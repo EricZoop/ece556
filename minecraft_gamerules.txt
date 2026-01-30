@@ -1,0 +1,6 @@
+/setworldspawn 0 0 0
+
+/gamerule spawnRadius 0
+/team add bots "bots"
+/team modify bots collisionRule never
+/team modify bots friendlyFire false
