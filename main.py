@@ -8,8 +8,8 @@ mineflayer = require('mineflayer')
 BOT_COUNT = 5
 TEAM_NAME = "bots"
 SPAWN_POS = {'x': 0.5, 'y': 0, 'z': 0.5}   # Where they start the course
-PURGATORY_POS = {'x': -15, 'y': 1, 'z': 0.5} # Where they wait after failing
-GOAL_POS = {'x': 25.5, 'y': 0, 'z': 0.5}
+PURGATORY_POS = {'x': -15, 'y': 0, 'z': 0.5} # Where they wait after failing
+GOAL_POS = {'x': 10, 'y': 0, 'z': 0.5}
 
 # --- Training Parameters ---
 TIMEOUT_SECONDS = 20
@@ -71,10 +71,6 @@ class BotGeneration:
                 return
             
             tracker.tick_count += 1
-            
-            # Safety: Wait for 20 ticks to stabilize after TP to spawn position
-            if tracker.tick_count < 20: 
-                return
 
             # 1. Death Check - fell into void
             if bot.entity and bot.entity.position.y < DEATH_Y:
@@ -142,17 +138,18 @@ class BotGeneration:
         ]
     
     def execute_action(self, bot, action):
-        """Execute the action vector on the bot"""
+        """Execute the action vector and orient the bot toward the goal."""
         if not bot.entity: 
             return 
         
+        # --- Existing Movement Logic ---
         bot.setControlState('forward', bool(action[0]))
         bot.setControlState('back', bool(action[1]))
         bot.setControlState('left', bool(action[2]))
         bot.setControlState('right', bool(action[3]))
         bot.setControlState('jump', bool(action[4]))
         bot.setControlState('sprint', bool(action[5]))
-    
+
     def check_generation_complete(self):
         """Check if all bots have finished their runs and auto-restart."""
         all_finished = all(not t.is_active for t in self.trackers)
@@ -190,9 +187,6 @@ def main():
         gen.create_bot(i)
     
     print(f"\n[INIT] Creating {BOT_COUNT} bots...")
-    print("[INFO] Bots will spawn in purgatory and wait")
-    print("[INFO] To start first run, wait ~5 seconds then run in console:")
-    print("       >>> gen.start_new_run()")
     
     # Store gen globally so you can call gen.start_new_run() from console
     globals()['gen'] = gen
