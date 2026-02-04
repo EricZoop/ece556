@@ -9,10 +9,10 @@ import json
 class NeuralNetwork:
     """Feedforward neural network with one hidden layer for bot control."""
     
-    def __init__(self, input_size=1340, hidden_size=64, output_size=6):
+    def __init__(self, input_size=24, hidden_size=32, output_size=6):
         """
         Args:
-            input_size: Size of flattened voxel grid + other sensors
+            input_size: Size of flattened sensor inputs (rays + position + velocity + etc)
             hidden_size: Number of neurons in hidden layer
             output_size: 6 actions [forward, back, left, right, jump, sprint]
         """
@@ -30,24 +30,28 @@ class NeuralNetwork:
         self.randomize_weights()
     
     def randomize_weights(self, scale=0.5):
-        """Initialize weights with random values."""
+        """Initialize weights with random values using Xavier initialization."""
         import random
+        
+        # Xavier initialization for better starting point
+        xavier_input = math.sqrt(2.0 / (self.input_size + self.hidden_size))
+        xavier_output = math.sqrt(2.0 / (self.hidden_size + self.output_size))
         
         # Input to hidden
         for i in range(self.input_size):
             for j in range(self.hidden_size):
-                self.weights_input_hidden[i][j] = (random.random() - 0.5) * scale
+                self.weights_input_hidden[i][j] = (random.random() - 0.5) * 2 * xavier_input
         
         for j in range(self.hidden_size):
-            self.bias_hidden[j] = (random.random() - 0.5) * scale
+            self.bias_hidden[j] = (random.random() - 0.5) * 0.1
         
         # Hidden to output
         for i in range(self.hidden_size):
             for j in range(self.output_size):
-                self.weights_hidden_output[i][j] = (random.random() - 0.5) * scale
+                self.weights_hidden_output[i][j] = (random.random() - 0.5) * 2 * xavier_output
         
         for j in range(self.output_size):
-            self.bias_output[j] = (random.random() - 0.5) * scale
+            self.bias_output[j] = (random.random() - 0.5) * 0.1
     
     def sigmoid(self, x):
         """Sigmoid activation function."""
@@ -56,6 +60,10 @@ class NeuralNetwork:
     def tanh(self, x):
         """Tanh activation function."""
         return math.tanh(max(-20, min(20, x)))
+    
+    def relu(self, x):
+        """ReLU activation function."""
+        return max(0, x)
     
     def forward(self, inputs):
         """
@@ -75,7 +83,7 @@ class NeuralNetwork:
             else:
                 inputs = inputs[:self.input_size]
         
-        # Hidden layer
+        # Hidden layer with tanh activation
         hidden = []
         for j in range(self.hidden_size):
             activation = self.bias_hidden[j]
@@ -83,7 +91,7 @@ class NeuralNetwork:
                 activation += inputs[i] * self.weights_input_hidden[i][j]
             hidden.append(self.tanh(activation))
         
-        # Output layer
+        # Output layer with sigmoid activation
         outputs = []
         for j in range(self.output_size):
             activation = self.bias_output[j]

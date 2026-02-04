@@ -1,31 +1,31 @@
 """
 Bot tracking and sensor data collection for neuromorphic parkour training.
-Handles voxel mapping and vector inputs for neural processing.
+Handles raycasting (lidar), vector inputs, and fitness calculation.
 """
 
 import math
+import time
 from javascript import require # type: ignore
 
 Vec3 = require('vec3')
 
 class BotTracker:
-    """Tracks bot state and provides sensory input vectors for neuromorphic processing."""
-    
-    def __init__(self, bot, target_pos, scan_radius=5):
+    def __init__(self, bot, target_pos, ray_max_dist=6):
         self.bot = bot
         self.target_pos = Vec3(target_pos['x'], target_pos['y'], target_pos['z'])
         
-        # Performance tracking
         self.is_active = False 
         self.is_alive = True
         self.reached_goal = False
         self.tick_count = 0
         self.max_distance_to_goal = None
+        self.min_distance_to_goal = None
         self.fitness_score = 0.0
-        self.start_pos = None  # Track start position
+        self.start_pos = None
+        self.run_duration = 0.0
         
-        # Sensor configuration
-        self.scan_radius = scan_radius
+        self.visited_blocks = set()
+        self.ray_max_dist = ray_max_dist
 
     def reset_for_run(self):
         self.is_active = True
@@ -33,22 +33,37 @@ class BotTracker:
         self.tick_count = 0
         self.fitness_score = 0.0
         self.max_distance_to_goal = None
+        self.min_distance_to_goal = None
+        self.start_time = time.time()
         
-        # Capture start position for displacement checks
-        if self.bot.entity:
-            self.start_pos = self.bot.entity.position.clone()
+        self.visited_blocks = set()
+        
+        if self.bot.entity and self.bot.entity.position:
+            try:
+                self.start_pos = self.bot.entity.position.clone()
+                self.visited_blocks.add((int(self.start_pos.x), int(self.start_pos.z)))
+            except:
+                pos = self.bot.entity.position
+                self.start_pos = Vec3(pos.x, pos.y, pos.z)
+                self.visited_blocks.add((int(pos.x), int(pos.z)))
         else:
             self.start_pos = None
         
     def get_position_vector(self):
         if not self.bot.entity: return [0, 0, 0]
         pos = self.bot.entity.position
-        return [pos.x, pos.y, pos.z]
+        try:
+            return [float(pos.x), float(pos.y), float(pos.z)]
+        except AttributeError:
+            return [float(pos[0]), float(pos[1]), float(pos[2])]
     
     def get_velocity_vector(self):
         if not self.bot.entity: return [0, 0, 0]
         vel = self.bot.entity.velocity
-        return [vel.x, vel.y, vel.z]
+        try:
+            return [float(vel.x), float(vel.y), float(vel.z)]
+        except AttributeError:
+            return [float(vel[0]), float(vel[1]), float(vel[2])]
     
     def get_yaw_pitch(self):
         if not self.bot.entity: return [0, 0]
@@ -56,121 +71,198 @@ class BotTracker:
     
     def get_distance_to_goal(self):
         if not self.bot.entity: return 999.0
-        return self.bot.entity.position.distanceTo(self.target_pos)
-    
+        try:
+            return float(self.bot.entity.position.distanceTo(self.target_pos))
+        except:
+            p = self.get_position_vector()
+            t = [self.target_pos.x, self.target_pos.y, self.target_pos.z]
+            return math.sqrt((p[0]-t[0])**2 + (p[1]-t[1])**2 + (p[2]-t[2])**2)
+            
     def get_direction_to_goal(self):
         if not self.bot.entity: return [0, 0, 0]
-        pos = self.bot.entity.position
-        
-        dx = self.target_pos.x - pos.x
-        dy = self.target_pos.y - pos.y
-        dz = self.target_pos.z - pos.z
-        
+        current_pos = self.get_position_vector()
+        dx = self.target_pos.x - current_pos[0]
+        dy = self.target_pos.y - current_pos[1]
+        dz = self.target_pos.z - current_pos[2]
         distance = math.sqrt(dx*dx + dy*dy + dz*dz)
         if distance < 0.001: return [0.0, 0.0, 0.0]
-        
         return [dx/distance, dy/distance, dz/distance]
-    
-    def get_voxel_grid(self):
+
+    def _cast_ray(self, yaw_offset, pitch_offset):
+        if not self.bot.entity or not self.bot.entity.position: 
+            return 0.0
+        try:
+            pos = self.get_position_vector()
+            start_x = pos[0]
+            start_y = pos[1]
+            start_z = pos[2]
+            
+            height = 1.62
+            if hasattr(self.bot.entity, 'height'):
+                height = float(self.bot.entity.height)
+            start_y += height
+            
+            yaw = self.bot.entity.yaw + yaw_offset
+            pitch = self.bot.entity.pitch + pitch_offset
+            
+            vx = -math.sin(yaw) * math.cos(pitch)
+            vy = math.sin(pitch)
+            vz = -math.cos(yaw) * math.cos(pitch)
+            
+            for dist in range(1, self.ray_max_dist + 1):
+                tx = start_x + (vx * dist)
+                ty = start_y + (vy * dist)
+                tz = start_z + (vz * dist)
+                point = Vec3(tx, ty, tz)
+                block = self.bot.blockAt(point)
+                if block and block.boundingBox == 'block':
+                    return 1.0 - (dist / self.ray_max_dist)
+        except Exception:
+            return 0.0
+        return 0.0 
+
+    def get_surrounding_rays(self):
         """
-        Returns flattened voxel grid.
-        0: Air, 1: Solid, 0.5: Partial, 2: Liquid, 3: Climbable, -1: Unloaded
+        Updated Vision System: "Platform Awareness"
+        Now includes rays angled downward to detect valid landing spots 
+        to the sides and diagonals, not just forward.
         """
-        if not self.bot.entity: return []
-        pos = self.bot.entity.position.floored()
-        voxel_data = []
+        rays = []
         
-        for dy in range(-self.scan_radius, self.scan_radius + 1):
-            for dz in range(-self.scan_radius, self.scan_radius + 1):
-                for dx in range(-self.scan_radius, self.scan_radius + 1):
-                    target_pos = pos.offset(dx, dy, dz)
-                    block = self.bot.blockAt(target_pos)
-                    
-                    if block is None:
-                        voxel_data.append(-1)
-                    elif block.name == 'air':
-                        voxel_data.append(0)
-                    elif 'ladder' in block.name or 'vine' in block.name:
-                        voxel_data.append(3)
-                    elif 'water' in block.name or 'lava' in block.name:
-                        voxel_data.append(2)
-                    elif any(s in block.name for s in ['fence', 'slab', 'wall', 'pane']):
-                        voxel_data.append(0.5)
-                    else:
-                        voxel_data.append(1)
+        # 1. OBSTACLE AWARENESS (Eye Level - Pitch 0)
+        # 8 Rays: Detects walls and barriers 360 degrees around
+        for i in range(8):
+            angle = i * (math.pi / 4) 
+            rays.append(self._cast_ray(angle, 0))
+            
+        # 2. PLATFORM AWARENESS (Down 30° - Pitch -0.5)
+        # 5 Rays: Detects if there is ground to stand/jump on.
+        # This helps the bot find "New Blocks" to the side.
+        # Angles: Forward(0), Left(90), Right(-90), Diagonal-L(45), Diagonal-R(-45)
+        platform_angles = [0, math.pi/2, -math.pi/2, math.pi/4, -math.pi/4]
+        for angle in platform_angles:
+            rays.append(self._cast_ray(angle, -0.5))
+            
+        # 3. SPECIALTY RAYS
+        rays.append(self._cast_ray(0, -1.2)) # Deep Void (Is there a pit strictly below?)
+        rays.append(self._cast_ray(0, 0.5))  # Head Check (Is there a ceiling/overhang?)
         
-        return voxel_data
+        # Total Ray Count: 8 + 5 + 2 = 15 Rays
+        return rays
     
-    def get_block_below(self):
-        if not self.bot.entity: return -1
-        pos = self.bot.entity.position.floored()
-        block = self.bot.blockAt(pos.offset(0, -1, 0))
-        
-        if block is None: return -1
-        if block.name == 'air': return 0
-        if 'ladder' in block.name: return 3
-        if any(s in block.name for s in ['fence', 'slab', 'wall', 'pane']): return 0.5
-        return 1
+    def get_on_ground(self):
+        if not self.bot.entity: return 0
+        return 1 if self.bot.entity.onGround else 0
     
     def get_sensor_input_vector(self):
-        is_sprinting = 0
-        if self.bot.entity and hasattr(self.bot, 'controlState'):
-            try:
-                is_sprinting = 1 if self.bot.controlState.sprint else 0
-            except (AttributeError, TypeError):
-                is_sprinting = 0
+        """
+        Returns NORMALIZED sensor inputs (23 inputs).
+        Removed: is_sprinting (always true) and is_sneaking (disabled).
+        """
+        position = self.get_position_vector()
+        norm_position = [
+            (position[0] - self.target_pos.x) / 20.0,
+            (position[1] - self.target_pos.y) / 10.0,
+            (position[2] - self.target_pos.z) / 20.0
+        ]
+        
+        velocity = self.get_velocity_vector()
+        norm_velocity = [
+            max(-1, min(1, velocity[0])),
+            max(-1, min(1, velocity[1])),
+            max(-1, min(1, velocity[2]))
+        ]
+        
+        orientation = self.get_yaw_pitch()
+        norm_orientation = [
+            orientation[0] / math.pi,      
+            orientation[1] / (math.pi/2)   
+        ]
         
         return {
-            'voxel_grid': self.get_voxel_grid(),
-            'position': self.get_position_vector(),
-            'velocity': self.get_velocity_vector(),
-            'orientation': self.get_yaw_pitch(),
-            'goal_direction': self.get_direction_to_goal(),
-            'goal_distance': self.get_distance_to_goal(),
-            'block_below': self.get_block_below(),
-            'is_sprinting': is_sprinting
+            'rays': self.get_surrounding_rays(),   # 11 rays
+            'position': norm_position,             # 3 values
+            'velocity': norm_velocity,             # 3 values
+            'orientation': norm_orientation,       # 2 values
+            'goal_direction': self.get_direction_to_goal(), # 3 values
+            'on_ground': self.get_on_ground(),     # 1 value
+            # Total: 23
         }
     
     def update_fitness(self):
+        """
+        Straight-Line Fitness:
+        Optimized for linear speed and obstacle traversal.
+        Removes complex 'exploration' logic in favor of raw distance reduction.
+        """
         current_distance = self.get_distance_to_goal()
+        
+        # Capture starting distance once
         if self.max_distance_to_goal is None:
             self.max_distance_to_goal = current_distance
+            
+        curr_pos = self.get_position_vector()
         
-        # 1. Base Progress
+        # === 1. PROGRESS REWARD (The Main Driver) ===
+        # Simple: How much closer are we than when we started?
+        # If we move 1 block forward -> +150 points.
+        # If we move 1 block backward -> -150 points.
         progress = self.max_distance_to_goal - current_distance
-        
-        # 2. Time Penalty (Linear)
-        time_penalty = self.tick_count * 0.1  # Increased slightly to encourage speed
-        
-        # 3. Vertical Bonus (Reward for climbing)
-        vertical_bonus = 0
-        if self.bot.entity:
-            vertical_bonus = max(0, self.bot.entity.position.y) * 2.0
-            
-        # 4. Stagnation / Idleness Penalty (XZ Plane only)
-        stagnation_penalty = 0
-        if self.bot.entity and self.start_pos:
-            curr = self.bot.entity.position
-            # Calculate 2D Euclidean distance on XZ plane
-            xz_displacement = math.sqrt((curr.x - self.start_pos.x)**2 + (curr.z - self.start_pos.z)**2)
-            
-            # If moved less than 1.5 blocks horizontally over the whole run
-            if xz_displacement < 1.5:
-                stagnation_penalty = 150.0  # Massive penalty for camping
-        
-        # Base Score prevents 0.00 floor for honest attempts
-        # Active bots start at 200. Lazy bots drop to ~50. Reaching goal is ~1200+
-        BASE_SCORE = 200.0
-        
-        final_score = BASE_SCORE + progress + vertical_bonus - time_penalty - stagnation_penalty
-        
-        if self.reached_goal:
-            final_score += 1000.0
-            
-        self.fitness_score = max(0, final_score)
-        
-        return self.fitness_score
+        progress_reward = progress * 150.0
 
-    def check_goal_reached(self, tolerance=1):
+        # === 2. ALIGNMENT BONUS (Steering) ===
+        # Reward for looking directly at the goal.
+        # This prevents them from running sideways or spinning.
+        goal_dir = self.get_direction_to_goal()
+        bot_yaw = self.bot.entity.yaw
+        look_x = -math.sin(bot_yaw)
+        look_z = -math.cos(bot_yaw)
+        
+        # Dot product: 1.0 = Perfect Alignment, 0.0 = 90 degrees off
+        alignment = (look_x * goal_dir[0]) + (look_z * goal_dir[2])
+        alignment_reward = 0
+        if alignment > 0.8: # Only reward if generally facing the right way
+            alignment_reward = alignment * 20.0
+
+        # === 3. MOMENTUM REWARD ===
+        # Keep moving fast!
+        vel = self.get_velocity_vector()
+        speed = math.sqrt(vel[0]**2 + vel[2]**2)
+        momentum_reward = 0
+        if speed > 0.15: 
+            momentum_reward = speed * 50.0
+
+        # === 4. PENALTIES ===
+        
+        # Death Penalty (Falling off the straight track)
+        death_penalty = 0
+        if curr_pos[1] < -1:
+             death_penalty = 200.0
+        
+        # Stagnation Penalty
+        # If we haven't made 1 block of progress after 2 seconds (40 ticks)
+        stagnation_penalty = 0
+        if self.tick_count > 40 and progress < 1.0:
+             stagnation_penalty = self.tick_count * 2.0
+
+        # === TOTAL CALCULATION ===
+        fitness = (progress_reward + 
+                   alignment_reward + 
+                   momentum_reward - 
+                   death_penalty - 
+                   stagnation_penalty)
+        
+        # === GOAL COMPLETION ===
+        if self.reached_goal:
+            # Huge reward + Time Bonus
+            fitness += 5000.0
+            duration = time.time() - self.start_time
+            # Every 0.01s saved is worth 10 points
+            time_bonus = max(0, (10.0 - duration) * 1000.0)
+            fitness += time_bonus
+        
+        self.fitness_score = fitness
+        return self.fitness_score
+    def check_goal_reached(self, tolerance=2):
         if not self.bot.entity: return False
         return self.get_distance_to_goal() < tolerance
