@@ -1,6 +1,16 @@
-/setworldspawn 0 0 0
+192.168.1.118
 
+/setworldspawn -15 0 0
 /gamerule spawnRadius 0
 /team add bots "bots"
 /team modify bots collisionRule never
 /team modify bots friendlyFire false
+/op @a
+
+/gamerule fallDamage false
+/gamerule doImmediateRespawn true
+/gamerule sendCommandFeedback false
+/kill @e[type=player]
+
+COMMANDS
+/summon firework_rocket ~ ~1 ~ {LifeTime:12,FireworksItem:{id:"minecraft:firework_rocket",Count:1,tag:{Fireworks:{Explosions:[{Type:2,Colors:[I;16776960]}]}}}}

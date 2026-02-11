@@ -10,14 +10,14 @@ from neural_network import NeuralNetwork
 class GeneticAlgorithm:
     """Manages population of neural networks and evolution process."""
     
-    def __init__(self, population_size, input_size=27, hidden_size=32, output_size=4,
+    def __init__(self, population_size, input_size=33, hidden_size=32, output_size=3,
                  mutation_rate=0.15, mutation_strength=0.3, elite_count=2):
         """
         Args:
             population_size: Number of individuals in population
-            input_size: Neural network input size (23 now)
+            input_size: Neural network input size (33)
             hidden_size: Neural network hidden layer size
-            output_size: Neural network output size (4 now: Fwd, Left, Right, Jump)
+            output_size: Neural network output size (3: Left, Right, Jump)
             mutation_rate: Probability of mutating each weight
             mutation_strength: Magnitude of weight mutations
             elite_count: Number of top performers to keep unchanged
@@ -67,17 +67,17 @@ class GeneticAlgorithm:
         self.avg_fitness_history.append(avg_fitness)
         
         # Adaptive mutation: increase mutation if stuck
-        if best_fitness > self.last_best_fitness + 10:  # Significant improvement
+        if best_fitness > self.last_best_fitness + 50:  # Significant improvement
             self.generations_without_improvement = 0
             self.last_best_fitness = best_fitness
         else:
             self.generations_without_improvement += 1
         
         # Adjust mutation based on progress
-        if self.generations_without_improvement > 5:
-            # Increase exploration if stuck for 5 generations
-            self.mutation_rate = min(0.3, self.initial_mutation_rate * 1.5)
-            self.mutation_strength = min(0.5, self.initial_mutation_strength * 1.3)
+        if self.generations_without_improvement > 3:
+            # Increase exploration if stuck for 3 generations
+            self.mutation_rate = min(0.4, self.initial_mutation_rate * 2.0)
+            self.mutation_strength = min(0.6, self.initial_mutation_strength * 2.0)
         else:
             # Return to normal mutation
             self.mutation_rate = self.initial_mutation_rate
@@ -226,7 +226,7 @@ class GeneticAlgorithm:
             data = json.load(f)
         
         # Handle backward compatibility for files without output_size
-        output_size = data.get('output_size', 6) # Default to 6 if missing
+        output_size = data.get('output_size', 3) # Default to 3 if missing
         
         ga = GeneticAlgorithm(
             population_size=data['population_size'],

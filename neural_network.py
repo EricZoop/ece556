@@ -9,12 +9,12 @@ import json
 class NeuralNetwork:
     """Feedforward neural network with one hidden layer for bot control."""
     
-    def __init__(self, input_size=24, hidden_size=32, output_size=6):
+    def __init__(self, input_size=33, hidden_size=32, output_size=3):
         """
         Args:
             input_size: Size of flattened sensor inputs (rays + position + velocity + etc)
             hidden_size: Number of neurons in hidden layer
-            output_size: 6 actions [forward, back, left, right, jump, sprint]
+            output_size: 3 actions [left, right, jump] (forward and sprint are always ON)
         """
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -73,7 +73,8 @@ class NeuralNetwork:
             inputs: List of sensor values (flattened)
         
         Returns:
-            List of 6 boolean actions [forward, back, left, right, jump, sprint]
+            List of 3 boolean actions [left, right, jump]
+            (forward and sprint are hardcoded to always be True)
         """
         # Ensure input is the correct size
         if len(inputs) != self.input_size:
