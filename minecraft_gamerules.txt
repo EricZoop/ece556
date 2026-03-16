@@ -1,11 +1,12 @@
-192.168.1.118
+# push to server ip 192.168.1.118
 
-/setworldspawn -15 0 0
+/setworldspawn -15 -63 0
 /gamerule spawnRadius 0
 /team add bots "bots"
 /team modify bots collisionRule never
 /team modify bots friendlyFire false
 /op @a
+/gamerule randomTickSpeed 0
 
 /gamerule fallDamage false
 /gamerule doImmediateRespawn true

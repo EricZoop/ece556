@@ -1,180 +1,173 @@
 """
-Simple feedforward neural network for parkour bot decision making.
-Uses sensory inputs to generate movement actions.
+Pure-Python feedforward neural network for parkour bot decision making.
+v2: Supports mixed output types — boolean actions + continuous yaw control.
 """
 
 import math
 import json
+import random
+import numpy as np
+
+
+def _sigmoid(x):
+    return 1.0 / (1.0 + math.exp(-max(-20.0, min(20.0, x))))
+
+
+def _tanh(x):
+    return math.tanh(max(-20.0, min(20.0, x)))
+
 
 class NeuralNetwork:
-    """Feedforward neural network with one hidden layer for bot control."""
-    
-    def __init__(self, input_size=33, hidden_size=32, output_size=3):
-        """
-        Args:
-            input_size: Size of flattened sensor inputs (rays + position + velocity + etc)
-            hidden_size: Number of neurons in hidden layer
-            output_size: 3 actions [left, right, jump] (forward and sprint are always ON)
-        """
-        self.input_size = input_size
+    """
+    Single-hidden-layer net: input →[tanh]→ hidden →[sigmoid]→ outputs.
+
+    Output convention:
+        indices 0..output_size-2  → boolean (sigmoid > 0.5)
+        index   output_size-1     → continuous (raw sigmoid value)
+
+    For the parkour bot:  [strafe_left, strafe_right, jump, yaw_delta]
+    """
+
+    def __init__(self, input_size=33, hidden_size=32, output_size=4):
+        self.input_size  = input_size
         self.hidden_size = hidden_size
         self.output_size = output_size
-        
-        # Initialize weights with small random values
-        self.weights_input_hidden = [[0.0] * hidden_size for _ in range(input_size)]
-        self.bias_hidden = [0.0] * hidden_size
+
+        self.weights_input_hidden  = [[0.0] * hidden_size for _ in range(input_size)]
+        self.bias_hidden           = [0.0] * hidden_size
         self.weights_hidden_output = [[0.0] * output_size for _ in range(hidden_size)]
-        self.bias_output = [0.0] * output_size
-        
-        # Randomize initial weights
-        self.randomize_weights()
-    
-    def randomize_weights(self, scale=0.5):
-        """Initialize weights with random values using Xavier initialization."""
-        import random
-        
-        # Xavier initialization for better starting point
-        xavier_input = math.sqrt(2.0 / (self.input_size + self.hidden_size))
-        xavier_output = math.sqrt(2.0 / (self.hidden_size + self.output_size))
-        
-        # Input to hidden
+        self.bias_output           = [0.0] * output_size
+
+        self._randomize_weights()
+
+    # ------------------------------------------------------------------
+    def _randomize_weights(self):
+        xi = math.sqrt(2.0 / (self.input_size  + self.hidden_size))
+        xo = math.sqrt(2.0 / (self.hidden_size + self.output_size))
+
         for i in range(self.input_size):
             for j in range(self.hidden_size):
-                self.weights_input_hidden[i][j] = (random.random() - 0.5) * 2 * xavier_input
-        
+                self.weights_input_hidden[i][j] = (random.random() - 0.5) * 2 * xi
+
         for j in range(self.hidden_size):
             self.bias_hidden[j] = (random.random() - 0.5) * 0.1
-        
-        # Hidden to output
+
         for i in range(self.hidden_size):
             for j in range(self.output_size):
-                self.weights_hidden_output[i][j] = (random.random() - 0.5) * 2 * xavier_output
-        
+                self.weights_hidden_output[i][j] = (random.random() - 0.5) * 2 * xo
+
         for j in range(self.output_size):
             self.bias_output[j] = (random.random() - 0.5) * 0.1
-    
-    def sigmoid(self, x):
-        """Sigmoid activation function."""
-        return 1.0 / (1.0 + math.exp(-max(-20, min(20, x))))  # Clamp to prevent overflow
-    
-    def tanh(self, x):
-        """Tanh activation function."""
-        return math.tanh(max(-20, min(20, x)))
-    
-    def relu(self, x):
-        """ReLU activation function."""
-        return max(0, x)
-    
+
+    # ------------------------------------------------------------------
+    def _pad_inputs(self, inputs):
+        n = self.input_size
+        if len(inputs) < n:
+            return list(inputs) + [0.0] * (n - len(inputs))
+        return inputs[:n]
+
+    # ------------------------------------------------------------------
     def forward(self, inputs):
         """
-        Forward pass through the network.
-        
-        Args:
-            inputs: List of sensor values (flattened)
-        
         Returns:
-            List of 3 boolean actions [left, right, jump]
-            (forward and sprint are hardcoded to always be True)
+            list — first N-1 elements are bool, last element is float (0..1)
         """
-        # Ensure input is the correct size
-        if len(inputs) != self.input_size:
-            # Pad or truncate
-            if len(inputs) < self.input_size:
-                inputs = inputs + [0.0] * (self.input_size - len(inputs))
-            else:
-                inputs = inputs[:self.input_size]
-        
-        # Hidden layer with tanh activation
+        inputs = self._pad_inputs(inputs)
+
         hidden = []
         for j in range(self.hidden_size):
-            activation = self.bias_hidden[j]
+            a = self.bias_hidden[j]
             for i in range(self.input_size):
-                activation += inputs[i] * self.weights_input_hidden[i][j]
-            hidden.append(self.tanh(activation))
-        
-        # Output layer with sigmoid activation
-        outputs = []
+                a += inputs[i] * self.weights_input_hidden[i][j]
+            hidden.append(_tanh(a))
+
+        raw_outputs = []
         for j in range(self.output_size):
-            activation = self.bias_output[j]
+            a = self.bias_output[j]
             for i in range(self.hidden_size):
-                activation += hidden[i] * self.weights_hidden_output[i][j]
-            outputs.append(self.sigmoid(activation))
-        
-        # Convert to boolean actions (threshold at 0.5)
-        actions = [output > 0.5 for output in outputs]
-        
+                a += hidden[i] * self.weights_hidden_output[i][j]
+            raw_outputs.append(_sigmoid(a))
+
+        # Boolean actions for all but the last output; last is continuous
+        actions = [v > 0.5 for v in raw_outputs[:-1]]
+        actions.append(raw_outputs[-1])  # yaw_delta as raw float
+
         return actions
-    
-    def get_weights(self):
-        """Return all weights as a flat list for genetic algorithm."""
-        weights = []
-        
-        # Flatten input->hidden weights
-        for i in range(self.input_size):
-            for j in range(self.hidden_size):
-                weights.append(self.weights_input_hidden[i][j])
-        
-        # Add hidden biases
-        weights.extend(self.bias_hidden)
-        
-        # Flatten hidden->output weights
-        for i in range(self.hidden_size):
-            for j in range(self.output_size):
-                weights.append(self.weights_hidden_output[i][j])
-        
-        # Add output biases
-        weights.extend(self.bias_output)
-        
-        return weights
-    
-    def set_weights(self, weights):
-        """Set all weights from a flat list."""
-        idx = 0
-        
-        # Set input->hidden weights
-        for i in range(self.input_size):
-            for j in range(self.hidden_size):
-                self.weights_input_hidden[i][j] = weights[idx]
-                idx += 1
-        
-        # Set hidden biases
+
+    # ------------------------------------------------------------------
+    def forward_with_activations(self, inputs):
+        inputs = self._pad_inputs(inputs)
+
+        hidden_raw = []
         for j in range(self.hidden_size):
-            self.bias_hidden[j] = weights[idx]
-            idx += 1
-        
-        # Set hidden->output weights
+            a = self.bias_hidden[j]
+            for i in range(self.input_size):
+                a += inputs[i] * self.weights_input_hidden[i][j]
+            hidden_raw.append(_tanh(a))
+
+        output_raw = []
+        for j in range(self.output_size):
+            a = self.bias_output[j]
+            for i in range(self.hidden_size):
+                a += hidden_raw[i] * self.weights_hidden_output[i][j]
+            output_raw.append(_sigmoid(a))
+
+        actions = [v > 0.5 for v in output_raw[:-1]]
+        actions.append(output_raw[-1])
+
+        activations = {
+            'input':  np.array(inputs,      dtype=np.float32),
+            'hidden': np.array(hidden_raw,  dtype=np.float32),
+            'output': np.array(output_raw,  dtype=np.float32),
+        }
+        return actions, activations
+
+    # ------------------------------------------------------------------
+    def get_weights(self):
+        w = []
+        for i in range(self.input_size):
+            for j in range(self.hidden_size):
+                w.append(self.weights_input_hidden[i][j])
+        w.extend(self.bias_hidden)
         for i in range(self.hidden_size):
             for j in range(self.output_size):
-                self.weights_hidden_output[i][j] = weights[idx]
-                idx += 1
-        
-        # Set output biases
+                w.append(self.weights_hidden_output[i][j])
+        w.extend(self.bias_output)
+        return w
+
+    def set_weights(self, weights):
+        idx = 0
+        for i in range(self.input_size):
+            for j in range(self.hidden_size):
+                self.weights_input_hidden[i][j] = weights[idx]; idx += 1
+        for j in range(self.hidden_size):
+            self.bias_hidden[j] = weights[idx]; idx += 1
+        for i in range(self.hidden_size):
+            for j in range(self.output_size):
+                self.weights_hidden_output[i][j] = weights[idx]; idx += 1
         for j in range(self.output_size):
-            self.bias_output[j] = weights[idx]
-            idx += 1
-    
+            self.bias_output[j] = weights[idx]; idx += 1
+
+    # ------------------------------------------------------------------
     def save_to_dict(self):
-        """Save network structure and weights to a dictionary."""
         return {
-            'input_size': self.input_size,
+            'input_size':  self.input_size,
             'hidden_size': self.hidden_size,
             'output_size': self.output_size,
-            'weights': self.get_weights()
+            'weights':     self.get_weights(),
         }
-    
+
     @staticmethod
     def load_from_dict(data):
-        """Load network from a dictionary."""
-        network = NeuralNetwork(
-            input_size=data['input_size'],
-            hidden_size=data['hidden_size'],
-            output_size=data['output_size']
+        net = NeuralNetwork(
+            input_size  = data['input_size'],
+            hidden_size = data['hidden_size'],
+            output_size = data['output_size'],
         )
-        network.set_weights(data['weights'])
-        return network
-    
+        net.set_weights(data['weights'])
+        return net
+
     def clone(self):
-        """Create a copy of this network."""
         new_net = NeuralNetwork(self.input_size, self.hidden_size, self.output_size)
         new_net.set_weights(self.get_weights())
         return new_net

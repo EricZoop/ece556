@@ -1,214 +1,259 @@
-"""
-track_bot.py
-Handles sensor data, fitness calculation, and state tracking.
-"""
-
 import math
 import time
-from javascript import require
+from javascript import require  # type: ignore
 
 Vec3 = require('vec3')
 
-class BotTracker:
-    def __init__(self, bot, target_pos, ray_max_dist=10):
-        self.bot = bot
-        # Convert target dictionary to Vec3
-        self.target_pos = Vec3(target_pos['x'], target_pos['y'], target_pos['z'])
-        
-        self.is_active = False 
-        self.reached_goal = False
-        self.tick_count = 0
-        self.start_time = 0.0
-        self.run_duration = 0.0
-        
-        self.fitness_score = 0.0
-        self.max_distance_to_goal = None # Furthest distance (start)
-        self.min_distance_to_goal = None # Closest approach
-        self.ray_max_dist = ray_max_dist
 
-    def reset_for_run(self):
-        """Resets all metrics for a new generation."""
-        self.is_active = False # distinct from 'enabled', waits for TP to finish
-        self.reached_goal = False
-        self.tick_count = 0
-        self.fitness_score = 0.0
-        self.run_duration = 0.0
+class BotTracker:
+    def __init__(self, bot, target_pos, ray_max_dist=10, spawn_pos=None):
+        self.bot = bot
+        self.target_pos = Vec3(target_pos['x'], target_pos['y'], target_pos['z'])
+        self.spawn_pos = (
+            Vec3(spawn_pos['x'], spawn_pos['y'], spawn_pos['z']) if spawn_pos else None
+        )
+
+        self.is_active            = False
+        self.reached_goal         = False
+        self.tick_count           = 0
+        self.start_time           = 0.0
+        self.run_duration         = 0.0
+
+        self.fitness_score        = 0.0
         self.max_distance_to_goal = None
         self.min_distance_to_goal = None
-        
-        # We do NOT set start_time here; we set it when the run officially begins
-        # to account for teleport delay.
+        self.ray_max_dist         = ray_max_dist
 
+        # Airtime tracking
+        self.air_ticks            = 0
+        self.ground_ticks         = 0
+
+        # Progress tracking
+        self.best_forward_progress = 0.0
+        self.closest_euclidean     = 999.0
+
+    # ------------------------------------------------------------------
+    def reset_for_run(self):
+        self.is_active            = False
+        self.reached_goal         = False
+        self.tick_count           = 0
+        self.fitness_score        = 0.0
+        self.run_duration         = 0.0
+        self.max_distance_to_goal = None
+        self.min_distance_to_goal = None
+
+        self.air_ticks             = 0
+        self.ground_ticks          = 0
+        self.best_forward_progress = 0.0
+        self.closest_euclidean     = 999.0
+
+    # ------------------------------------------------------------------
     def get_distance_to_goal(self):
-        """Calculates 3D distance to the target position."""
-        if not self.bot.entity: return 999.0
+        if not self.bot.entity:
+            return 999.0
         try:
             return float(self.bot.entity.position.distanceTo(self.target_pos))
-        except:
+        except Exception:
             return 999.0
 
     def get_direction_to_goal(self):
-        """Returns a normalized vector pointing to the goal."""
-        if not self.bot.entity: return [0, 0, 0]
-        
+        """Goal direction in the bot's LOCAL frame (accounts for yaw)."""
+        if not self.bot.entity:
+            return [0.0, 0.0, 0.0]
         pos = self.bot.entity.position
         dx = self.target_pos.x - pos.x
         dy = self.target_pos.y - pos.y
         dz = self.target_pos.z - pos.z
-        
-        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-        if dist < 0.001: return [0.0, 0.0, 0.0]
-        
-        return [dx/dist, dy/dist, dz/dist]
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if dist < 0.001:
+            return [0.0, 0.0, 0.0]
 
+        # Rotate the world-space direction into the bot's local frame
+        # so the network sees "goal is to my front-left" not "goal is at -X, +Z"
+        yaw = self.bot.entity.yaw
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
+
+        # Mineflayer: forward = -sin(yaw)*X component, -cos(yaw)*Z component
+        local_forward = (-sin_y * dx + -cos_y * dz) / dist
+        local_right   = ( cos_y * dx + -sin_y * dz) / dist
+        local_up      = dy / dist
+
+        return [local_forward, local_right, local_up]
+
+    # ------------------------------------------------------------------
     def _cast_ray(self, yaw_offset, pitch_offset):
-        """
-        Casts a ray from the bot's eye position.
-        Returns 0.0 (far/nothing) to 1.0 (immediate obstacle).
-        """
-        if not self.bot.entity: return 0.0
-        
+        if not self.bot.entity:
+            return 0.0
         try:
-            yaw = self.bot.entity.yaw + yaw_offset
+            yaw   = self.bot.entity.yaw + yaw_offset
             pitch = self.bot.entity.pitch + pitch_offset
-            
-            # Start at eye level
+
             pos = self.bot.entity.position.offset(0, 1.62, 0)
-            
-            # Calculate direction vector
+
             vx = -math.sin(yaw) * math.cos(pitch)
-            vy = math.sin(pitch)
+            vy =  math.sin(pitch)
             vz = -math.cos(yaw) * math.cos(pitch)
-            
-            # Step through the ray
-            for dist in range(1, self.ray_max_dist + 1):
-                # Calculate check position
+
+            steps = int(self.ray_max_dist * 2)
+            for i in range(1, steps + 1):
+                dist = i * 0.5
                 check_pos = pos.offset(vx * dist, vy * dist, vz * dist)
-                
-                # Check for block
                 block = self.bot.blockAt(check_pos)
+
                 if block and block.boundingBox == 'block':
-                    # Linear falloff: 1.0 at distance 0, 0.0 at max_dist
                     return 1.0 - (dist / self.ray_max_dist)
-                    
         except Exception:
             return 0.0
-            
-        return 0.0 
+        return 0.0
 
-    def get_sensor_input_vector(self):
+    # ------------------------------------------------------------------
+    def get_sensor_input_vector(self, timeout_seconds):
         """
-        Collects all sensor data for the neural network.
-        Returns a dictionary containing flattened input arrays.
+        Optimized sensor layout — 19 rays focused on the FORWARD hemisphere
+        plus critical ground-check rays. All ray angles are relative to the
+        bot's current yaw, so turning changes what they see.
+
+        Ray budget:  19 rays  (down from 27)
+        Total input: 33       (down from 41)
+
+        Layout:
+          Forward arc, horizontal (5):   -60°, -30°, 0°, +30°, +60°
+          Forward arc, down-angled (5):  same yaw offsets, pitch -0.35
+          Forward arc, up-angled (3):    -45°, 0°, +45°  pitch +0.6
+          Steep jump trajectory (3):     -30°, 0°, +30°  pitch -0.9
+          Ground checks (3):            straight-down, slight-left-down, slight-right-down
         """
         if not self.bot.entity or not self.is_active:
-            # Return empty/zero inputs if entity doesn't exist yet or is inactive
             return {
-                'rays': [0] * 21,
-                'position': [0, 0, 0],
-                'velocity': [0, 0, 0],
-                'orientation': [0, 0],
-                'goal_direction': [0, 0, 0],
-                'on_ground': 0
+                'rays': [0] * 19,
+                'position': [0] * 3,
+                'velocity': [0] * 3,
+                'orientation': [0] * 2,
+                'goal_direction': [0] * 3,
+                'on_ground': 0,
+                'distance_to_goal': 0,
+                'time_remaining': 0,
             }
-            
-        # 1. RAYCASTING (Vision)
+
         rays = []
-        # Eye level (Horizontal awareness)
-        for i in range(8): 
-            rays.append(self._cast_ray(i * (math.pi/4), 0))
-        # Downward angled (Platform awareness)
-        for i in range(8): 
-            rays.append(self._cast_ray(i * (math.pi/4), -0.5))
-        # Jump trajectory (Landing awareness)
-        for angle in [0, math.pi/4, -math.pi/4]: 
-            rays.append(self._cast_ray(angle, -1.0))
-        # Special (Ceiling + Deep Void)
-        rays.append(self._cast_ray(0, -1.5))
-        rays.append(self._cast_ray(0, 0.5))
-        
-        # 2. STATE VECTORS
+
+        # --- Forward hemisphere, horizontal (5) ---
+        for angle in [-1.047, -0.524, 0, 0.524, 1.047]:  # -60° to +60°
+            rays.append(self._cast_ray(angle, 0))
+
+        # --- Forward hemisphere, down-angled for platform detection (5) ---
+        for angle in [-1.047, -0.524, 0, 0.524, 1.047]:
+            rays.append(self._cast_ray(angle, -0.35))
+
+        # --- Forward hemisphere, upward for ceiling/wall tops (3) ---
+        for angle in [-0.785, 0, 0.785]:  # -45°, 0°, +45°
+            rays.append(self._cast_ray(angle, 0.6))
+
+        # --- Steep jump trajectory (3) ---
+        for angle in [-0.524, 0, 0.524]:  # -30°, 0°, +30°
+            rays.append(self._cast_ray(angle, -0.9))
+
+        # --- Ground checks (3): down, down-left, down-right ---
+        rays.append(self._cast_ray(0, -1.57))       # straight down
+        rays.append(self._cast_ray(-0.785, -1.2))   # down-left
+        rays.append(self._cast_ray( 0.785, -1.2))   # down-right
+
+        # Total: 5 + 5 + 3 + 3 + 3 = 19
+
         pos = self.bot.entity.position
         vel = self.bot.entity.velocity
-        
-        # Normalize inputs reasonably
-        norm_pos = [
-            (pos.x - self.target_pos.x) / 20.0,
-            (pos.y - self.target_pos.y) / 10.0,
-            (pos.z - self.target_pos.z) / 20.0
-        ]
-        
-        norm_vel = [
-            max(-1, min(1, vel.x)),
-            max(-1, min(1, vel.y)),
-            max(-1, min(1, vel.z))
-        ]
-        
-        norm_orient = [
-            self.bot.entity.yaw / math.pi,
-            self.bot.entity.pitch / (math.pi/2)
-        ]
+
+        elapsed   = max(0, time.time() - self.start_time) if self.start_time > 0 else 0
+        norm_time = max(0, 1.0 - (elapsed / timeout_seconds))
+
+        # Track airtime every tick this is called
+        if self.bot.entity.onGround:
+            self.ground_ticks += 1
+        else:
+            self.air_ticks += 1
 
         return {
             'rays': rays,
-            'position': norm_pos,
-            'velocity': norm_vel,
-            'orientation': norm_orient,
+            'position': [
+                (pos.x - self.target_pos.x) / 25,
+                (pos.y - self.target_pos.y) / 10,
+                (pos.z - self.target_pos.z) / 25,
+            ],
+            'velocity': [
+                max(-1, min(1, vel.x)),
+                max(-1, min(1, vel.y)),
+                max(-1, min(1, vel.z)),
+            ],
+            'orientation': [
+                self.bot.entity.yaw / math.pi,
+                self.bot.entity.pitch / (math.pi / 2),
+            ],
             'goal_direction': self.get_direction_to_goal(),
-            'on_ground': 1 if self.bot.entity.onGround else 0
+            'on_ground': 1 if self.bot.entity.onGround else 0,
+            'distance_to_goal': min(1.0, self.get_distance_to_goal() / 30.0),
+            'time_remaining': norm_time,
         }
 
+    # ------------------------------------------------------------------
     def check_goal_reached(self):
-        """Checks if bot is within the goal bounding box."""
-        if not self.bot.entity: return False
-        
-        pos = self.bot.entity.position
-        
-        # Define goal bounds (1.5 block radius horizontally, 2 blocks vertically)
-        dx = abs(pos.x - self.target_pos.x)
-        dy = abs(pos.y - self.target_pos.y)
-        dz = abs(pos.z - self.target_pos.z)
-        
-        return dx < 1.5 and dz < 1.5 and dy < 2.0
+        if not self.bot.entity:
+            return False
 
-    def update_fitness(self):
-        """
-        Calculates fitness score based on progress towards goal.
-        Called once at the end of the run.
-        """
-        if not self.bot.entity and self.max_distance_to_goal is None:
-            return 0.0
-            
-        current_dist = self.get_distance_to_goal()
-        
-        # Initialize baselines if this is the first update
-        if self.max_distance_to_goal is None:
-            self.max_distance_to_goal = current_dist
-        if self.min_distance_to_goal is None:
-            self.min_distance_to_goal = current_dist
-            
-        # Update closest approach
-        if current_dist < self.min_distance_to_goal:
-            self.min_distance_to_goal = current_dist
-            
-        # --- SCORING LOGIC ---
-        
-        # 1. Progress Score: Difference between start dist and closest approach
-        # Multiplied by 10 to make 1 block = 10 points
-        progress = max(0, self.max_distance_to_goal - self.min_distance_to_goal)
-        score = progress * 10.0
-        
-        # 2. Survival Score: Small reward for staying alive (0.1 per tick)
-        # Only counts if the bot was active!
-        score += min(50.0, self.tick_count * 0.1)
-        
-        # 3. Completion Bonus
+        pos = self.bot.entity.position
+        dx = pos.x - self.target_pos.x
+        dy = pos.y - self.target_pos.y
+        dz = pos.z - self.target_pos.z
+
+        current_dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+        self.closest_euclidean = min(self.closest_euclidean, current_dist)
+
+        # Track best Euclidean progress (distance reduced from start)
+        if self.max_distance_to_goal is not None:
+            prog = self.max_distance_to_goal - current_dist
+            self.best_forward_progress = max(self.best_forward_progress, prog)
+
+        if dy < -1.0 or dy > 4.0:
+            return False
+
+        xz_dist = math.sqrt(dx * dx + dz * dz)
+        return xz_dist <= 1.25
+
+    # ------------------------------------------------------------------
+    def update_fitness(self, timeout_seconds):
+        total_ticks = self.air_ticks + self.ground_ticks
+        airtime_ratio = self.air_ticks / max(1, total_ticks)
+
+        # 1. Euclidean distance reduction — the primary gradient signal.
+        #    best_forward_progress is now computed as (start_dist - closest_dist)
+        #    in check_goal_reached, so it works for ANY course shape.
+        score = self.best_forward_progress * 20.0
+
+        # 2. Airtime reward — scales with progress so bunny-hopping in place
+        #    earns nothing, but sprint-jumping toward the goal earns a lot.
+        if total_ticks > 10:
+            progress_scale = min(1.0, self.best_forward_progress / 2.0)
+            score += airtime_ratio * 20.0 * progress_scale
+
+        # 3. Survival bonus — small reward for staying alive while progressing.
+        #    Prevents the GA from treating a 2.7s fall the same as a 0.5s fall.
+        if self.run_duration > 1.0 and self.best_forward_progress > 0.5:
+            score += min(self.run_duration, 6.0) * 2.0
+
+        # 4. Goal completion
         if self.reached_goal:
-            score += 500.0  # Big flat bonus
-            
-            # Speed Bonus: Reward faster times
-            time_taken = time.time() - self.start_time
-            score += max(0, (15.0 - time_taken) * 20.0)
-            
-        self.fitness_score = max(0, score)
+            score += 500.0
+            time_bonus = max(0, (timeout_seconds - self.run_duration) * 50.0)
+            score += time_bonus
+            score += airtime_ratio * 100.0
+        else:
+            if self.run_duration < 0.5:
+                score *= 0.1  # instant fall
+            elif self.run_duration >= timeout_seconds - 0.5:
+                if self.best_forward_progress < 1.5:
+                    score *= 0.2  # coward penalty
+                else:
+                    score *= 0.8
+
+        self.fitness_score = max(0.0, score)
         return self.fitness_score
