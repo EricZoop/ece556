@@ -28,7 +28,7 @@ mineflayer = require('mineflayer')
 
 # ========== DEFAULT CONFIGURATION ==========
 DEFAULT_CONFIG = {
-    'host':             '192.168.1.118',   # LAN IP — override via config.json or CLI arg
+    'host':             '192.168.1.118',   # LAN IP - override via config.json or CLI arg
     'port':             25565,
     'team_name':        'bots',
     'spawn_pos':        {'x': 0.5,  'y': -63, 'z': 0.5},
@@ -64,7 +64,7 @@ _quit_flag   = threading.Event()
 _trial_ref   = [None]   # list so the nested thread can write to it
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 def load_config(config_file=None):
     if config_file:
         try:
@@ -99,7 +99,7 @@ def _push_viz(activations: dict, meta: dict):
         except queue.Full: pass
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 class TrialBot:
     """Runs entirely inside a background daemon thread."""
 
@@ -299,9 +299,9 @@ class TrialBot:
         threading.Timer(2.0, restart).start()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 #  Matplotlib drawing helpers  (always called from main thread)
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 def _build_figure(input_size, hidden_size, output_size):
     fig = plt.figure(figsize=(17, 8), facecolor='#1a1a2e')
     fig.canvas.manager.set_window_title('Neural Activations – Trial Run')
@@ -347,7 +347,7 @@ def _redraw(ax_inp, ax_hid, ax_out, meta_txt, activations, meta, hidden_size):
     hid_vals = activations['hidden']
     out_vals = activations['output']
 
-    # ── inputs ──
+    # -- inputs --
     ax_inp.cla()
     ax_inp.set_facecolor('#0d0d1a')
     ax_inp.set_title(f'Inputs  ({len(inp_vals)})', color='#aaaacc', fontsize=10, pad=5)
@@ -372,7 +372,7 @@ def _redraw(ax_inp, ax_hid, ax_out, meta_txt, activations, meta, hidden_size):
     ax_inp.set_xlabel('Normalised value', color='#555577', fontsize=7)
     for sp in ax_inp.spines.values(): sp.set_color('#333366')
 
-    # ── hidden heatmap ──
+    # -- hidden heatmap --
     ax_hid.cla()
     ax_hid.set_facecolor('#0d0d1a')
     ax_hid.set_title(f'Hidden  ({hidden_size})', color='#aaaacc', fontsize=10, pad=5)
@@ -391,7 +391,7 @@ def _redraw(ax_inp, ax_hid, ax_out, meta_txt, activations, meta, hidden_size):
     ax_hid.set_ylabel('neuron row', color='#555577', fontsize=7)
     for sp in ax_hid.spines.values(): sp.set_color('#333366')
 
-    # ── outputs ──
+    # -- outputs --
     ax_out.cla()
     ax_out.set_facecolor('#0d0d1a')
     ax_out.set_title('Output  (3)', color='#aaaacc', fontsize=10, pad=5)
@@ -414,7 +414,7 @@ def _redraw(ax_inp, ax_hid, ax_out, meta_txt, activations, meta, hidden_size):
     ax_out.axvline(0.5, color='#444466', ls='--', lw=0.8)
     for sp in ax_out.spines.values(): sp.set_color('#333366')
 
-    # ── meta ──
+    # -- meta --
     parts = [
         f"t={meta.get('elapsed', 0):.1f}s",
         f"tick={meta.get('ticks', 0)}",
@@ -427,7 +427,7 @@ def _redraw(ax_inp, ax_hid, ax_out, meta_txt, activations, meta, hidden_size):
     meta_txt.set_text('   |   '.join(parts))
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 def _bot_thread_main(network_file: str, config: dict):
     trial = TrialBot(network_file, config)
     _trial_ref[0] = trial
@@ -446,7 +446,7 @@ def _bot_thread_main(network_file: str, config: dict):
                 trial.do_retry()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 def print_usage():
     print('\nUsage: python trial_run.py <network.json> [config.json]')
     print('\nConfig defaults:')

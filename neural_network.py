@@ -1,6 +1,6 @@
 """
 Pure-Python feedforward neural network for parkour bot decision making.
-v2: Supports mixed output types — boolean actions + continuous yaw control.
+v3: Mixed activations - sigmoid for boolean outputs, tanh for continuous yaw.
 """
 
 import math
@@ -19,13 +19,14 @@ def _tanh(x):
 
 class NeuralNetwork:
     """
-    Single-hidden-layer net: input →[tanh]→ hidden →[sigmoid]→ outputs.
+    Single-hidden-layer net: input →[tanh]→ hidden →[mixed]→ outputs.
 
-    Output convention:
-        indices 0..output_size-2  → boolean (sigmoid > 0.5)
-        index   output_size-1     → continuous (raw sigmoid value)
+    Output activations:
+        indices 0..output_size-2  → sigmoid → bool (> 0.5)
+        index   output_size-1     → tanh    → float in [-1, +1]
 
     For the parkour bot:  [strafe_left, strafe_right, jump, yaw_delta]
+    yaw_delta of -1 = full left turn, +1 = full right turn.
     """
 
     def __init__(self, input_size=33, hidden_size=32, output_size=4):
@@ -70,10 +71,11 @@ class NeuralNetwork:
     def forward(self, inputs):
         """
         Returns:
-            list — first N-1 elements are bool, last element is float (0..1)
+            list - first N-1 elements are bool, last element is float in [-1, +1]
         """
         inputs = self._pad_inputs(inputs)
 
+        # Hidden layer: tanh activation
         hidden = []
         for j in range(self.hidden_size):
             a = self.bias_hidden[j]
@@ -81,16 +83,21 @@ class NeuralNetwork:
                 a += inputs[i] * self.weights_input_hidden[i][j]
             hidden.append(_tanh(a))
 
-        raw_outputs = []
+        # Output layer: compute raw pre-activation values
+        raw = []
         for j in range(self.output_size):
             a = self.bias_output[j]
             for i in range(self.hidden_size):
                 a += hidden[i] * self.weights_hidden_output[i][j]
-            raw_outputs.append(_sigmoid(a))
+            raw.append(a)
 
-        # Boolean actions for all but the last output; last is continuous
-        actions = [v > 0.5 for v in raw_outputs[:-1]]
-        actions.append(raw_outputs[-1])  # yaw_delta as raw float
+        # Mixed activations:
+        #   indices 0..N-2 → sigmoid → bool
+        #   index   N-1    → tanh    → continuous [-1, +1]
+        actions = []
+        for j in range(self.output_size - 1):
+            actions.append(_sigmoid(raw[j]) > 0.5)
+        actions.append(_tanh(raw[-1]))  # yaw_delta: -1 to +1
 
         return actions
 
@@ -98,27 +105,35 @@ class NeuralNetwork:
     def forward_with_activations(self, inputs):
         inputs = self._pad_inputs(inputs)
 
-        hidden_raw = []
+        hidden_act = []
         for j in range(self.hidden_size):
             a = self.bias_hidden[j]
             for i in range(self.input_size):
                 a += inputs[i] * self.weights_input_hidden[i][j]
-            hidden_raw.append(_tanh(a))
+            hidden_act.append(_tanh(a))
 
-        output_raw = []
+        raw = []
         for j in range(self.output_size):
             a = self.bias_output[j]
             for i in range(self.hidden_size):
-                a += hidden_raw[i] * self.weights_hidden_output[i][j]
-            output_raw.append(_sigmoid(a))
+                a += hidden_act[i] * self.weights_hidden_output[i][j]
+            raw.append(a)
 
-        actions = [v > 0.5 for v in output_raw[:-1]]
-        actions.append(output_raw[-1])
+        # Final activations for logging/visualization
+        output_act = []
+        for j in range(self.output_size - 1):
+            output_act.append(_sigmoid(raw[j]))
+        output_act.append(_tanh(raw[-1]))
+
+        actions = []
+        for j in range(self.output_size - 1):
+            actions.append(output_act[j] > 0.5)
+        actions.append(output_act[-1])
 
         activations = {
             'input':  np.array(inputs,      dtype=np.float32),
-            'hidden': np.array(hidden_raw,  dtype=np.float32),
-            'output': np.array(output_raw,  dtype=np.float32),
+            'hidden': np.array(hidden_act,  dtype=np.float32),
+            'output': np.array(output_act,  dtype=np.float32),
         }
         return actions, activations
 

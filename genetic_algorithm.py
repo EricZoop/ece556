@@ -68,7 +68,7 @@ class GeneticAlgorithm:
     def select_parent(self):
         """
         Tournament selection with population-scaled tournament size.
-        For N=6:  tournament=2  (33% of pop — enough pressure, keeps diversity)
+        For N=6:  tournament=2  (33% of pop - enough pressure, keeps diversity)
         For N=10: tournament=3  (30% of pop)
         For N=20: tournament=4  (20% of pop)
         """

@@ -4,6 +4,12 @@ from javascript import require  # type: ignore
 
 Vec3 = require('vec3')
 
+# How many consecutive ticks of the same onGround value before we switch
+ON_GROUND_DEBOUNCE = 3
+
+# Quantize ray inputs to prevent float drift from changing hit results
+RAY_QUANTIZE_DECIMALS = 3
+
 
 class BotTracker:
     def __init__(self, bot, target_pos, ray_max_dist=10, spawn_pos=None):
@@ -14,9 +20,11 @@ class BotTracker:
         )
 
         self.is_active            = False
+        self.is_settling          = False
+        self.settle_ticks         = 0
         self.reached_goal         = False
         self.tick_count           = 0
-        self.start_time           = 0.0
+        self.wall_start           = 0.0
         self.run_duration         = 0.0
 
         self.fitness_score        = 0.0
@@ -32,11 +40,25 @@ class BotTracker:
         self.best_forward_progress = 0.0
         self.closest_euclidean     = 999.0
 
+        # Movement tracking - unique block positions visited
+        self.visited_blocks        = set()
+
+        # Facing-goal accumulator
+        self.facing_goal_sum       = 0.0
+        self.facing_goal_ticks     = 0
+
+        # Debounced onGround state
+        self._on_ground_stable     = True
+        self._on_ground_counter    = 0
+
     # ------------------------------------------------------------------
     def reset_for_run(self):
         self.is_active            = False
+        self.is_settling          = False
+        self.settle_ticks         = 0
         self.reached_goal         = False
         self.tick_count           = 0
+        self.wall_start           = 0.0
         self.fitness_score        = 0.0
         self.run_duration         = 0.0
         self.max_distance_to_goal = None
@@ -46,6 +68,35 @@ class BotTracker:
         self.ground_ticks          = 0
         self.best_forward_progress = 0.0
         self.closest_euclidean     = 999.0
+        self.visited_blocks        = set()
+        self.facing_goal_sum       = 0.0
+        self.facing_goal_ticks     = 0
+
+        self._on_ground_stable     = True
+        self._on_ground_counter    = 0
+
+    # ------------------------------------------------------------------
+    def _update_on_ground(self):
+        """
+        Debounce onGround so single-tick flickers don't change sensor input.
+        Only switches state after ON_GROUND_DEBOUNCE consecutive agreeing ticks.
+        """
+        if not self.bot.entity:
+            return
+
+        raw = bool(self.bot.entity.onGround)
+
+        if raw == self._on_ground_stable:
+            self._on_ground_counter = 0
+        else:
+            self._on_ground_counter += 1
+            if self._on_ground_counter >= ON_GROUND_DEBOUNCE:
+                self._on_ground_stable = raw
+                self._on_ground_counter = 0
+
+    @property
+    def on_ground(self):
+        return self._on_ground_stable
 
     # ------------------------------------------------------------------
     def get_distance_to_goal(self):
@@ -68,28 +119,62 @@ class BotTracker:
         if dist < 0.001:
             return [0.0, 0.0, 0.0]
 
-        # Rotate the world-space direction into the bot's local frame
-        # so the network sees "goal is to my front-left" not "goal is at -X, +Z"
-        yaw = self.bot.entity.yaw
+        yaw = round(self.bot.entity.yaw, RAY_QUANTIZE_DECIMALS)
         cos_y = math.cos(yaw)
         sin_y = math.sin(yaw)
 
-        # Mineflayer: forward = -sin(yaw)*X component, -cos(yaw)*Z component
         local_forward = (-sin_y * dx + -cos_y * dz) / dist
         local_right   = ( cos_y * dx + -sin_y * dz) / dist
         local_up      = dy / dist
 
         return [local_forward, local_right, local_up]
 
+    def _update_facing_goal(self):
+        if not self.bot.entity:
+            return
+        pos = self.bot.entity.position
+        dx = self.target_pos.x - pos.x
+        dz = self.target_pos.z - pos.z
+        dist_xz = math.sqrt(dx * dx + dz * dz)
+        if dist_xz < 0.001:
+            return
+
+        goal_nx = dx / dist_xz
+        goal_nz = dz / dist_xz
+
+        yaw = self.bot.entity.yaw
+        fwd_x = -math.sin(yaw)
+        fwd_z = -math.cos(yaw)
+
+        dot = fwd_x * goal_nx + fwd_z * goal_nz
+        self.facing_goal_sum += dot
+        self.facing_goal_ticks += 1
+
+    def _update_visited_blocks(self):
+        if not self.bot.entity:
+            return
+        pos = self.bot.entity.position
+        block_key = (int(math.floor(pos.x)), int(math.floor(pos.z)))
+        self.visited_blocks.add(block_key)
+
     # ------------------------------------------------------------------
     def _cast_ray(self, yaw_offset, pitch_offset):
         if not self.bot.entity:
             return 0.0
         try:
-            yaw   = self.bot.entity.yaw + yaw_offset
-            pitch = self.bot.entity.pitch + pitch_offset
+            # Quantize base orientation so tiny yaw/pitch drift
+            # doesn't change which block the ray hits
+            base_yaw   = round(self.bot.entity.yaw,   RAY_QUANTIZE_DECIMALS)
+            base_pitch = round(self.bot.entity.pitch,  RAY_QUANTIZE_DECIMALS)
+            yaw   = base_yaw + yaw_offset
+            pitch = base_pitch + pitch_offset
 
-            pos = self.bot.entity.position.offset(0, 1.62, 0)
+            pos = self.bot.entity.position
+            # Quantize ray origin so sub-epsilon position drift
+            # doesn't shift rays across block boundaries
+            eye_x = round(pos.x, RAY_QUANTIZE_DECIMALS)
+            eye_y = round(pos.y + 1.62, RAY_QUANTIZE_DECIMALS)
+            eye_z = round(pos.z, RAY_QUANTIZE_DECIMALS)
 
             vx = -math.sin(yaw) * math.cos(pitch)
             vy =  math.sin(pitch)
@@ -98,7 +183,11 @@ class BotTracker:
             steps = int(self.ray_max_dist * 2)
             for i in range(1, steps + 1):
                 dist = i * 0.5
-                check_pos = pos.offset(vx * dist, vy * dist, vz * dist)
+                check_pos = Vec3(
+                    eye_x + vx * dist,
+                    eye_y + vy * dist,
+                    eye_z + vz * dist,
+                )
                 block = self.bot.blockAt(check_pos)
 
                 if block and block.boundingBox == 'block':
@@ -108,21 +197,9 @@ class BotTracker:
         return 0.0
 
     # ------------------------------------------------------------------
-    def get_sensor_input_vector(self, timeout_seconds):
+    def get_sensor_input_vector(self, timeout_ticks):
         """
-        Optimized sensor layout — 19 rays focused on the FORWARD hemisphere
-        plus critical ground-check rays. All ray angles are relative to the
-        bot's current yaw, so turning changes what they see.
-
-        Ray budget:  19 rays  (down from 27)
-        Total input: 33       (down from 41)
-
-        Layout:
-          Forward arc, horizontal (5):   -60°, -30°, 0°, +30°, +60°
-          Forward arc, down-angled (5):  same yaw offsets, pitch -0.35
-          Forward arc, up-angled (3):    -45°, 0°, +45°  pitch +0.6
-          Steep jump trajectory (3):     -30°, 0°, +30°  pitch -0.9
-          Ground checks (3):            straight-down, slight-left-down, slight-right-down
+        19 rays + 3 pos + 3 vel + 2 orient + 3 goal_dir + 3 scalars = 33
         """
         if not self.bot.entity or not self.is_active:
             return {
@@ -139,39 +216,44 @@ class BotTracker:
         rays = []
 
         # --- Forward hemisphere, horizontal (5) ---
-        for angle in [-1.047, -0.524, 0, 0.524, 1.047]:  # -60° to +60°
+        for angle in [-1.047, -0.524, 0, 0.524, 1.047]:
             rays.append(self._cast_ray(angle, 0))
 
-        # --- Forward hemisphere, down-angled for platform detection (5) ---
+        # --- Forward hemisphere, down-angled (5) ---
         for angle in [-1.047, -0.524, 0, 0.524, 1.047]:
             rays.append(self._cast_ray(angle, -0.35))
 
-        # --- Forward hemisphere, upward for ceiling/wall tops (3) ---
-        for angle in [-0.785, 0, 0.785]:  # -45°, 0°, +45°
+        # --- Forward hemisphere, upward (3) ---
+        for angle in [-0.785, 0, 0.785]:
             rays.append(self._cast_ray(angle, 0.6))
 
         # --- Steep jump trajectory (3) ---
-        for angle in [-0.524, 0, 0.524]:  # -30°, 0°, +30°
+        for angle in [-0.524, 0, 0.524]:
             rays.append(self._cast_ray(angle, -0.9))
 
-        # --- Ground checks (3): down, down-left, down-right ---
-        rays.append(self._cast_ray(0, -1.57))       # straight down
-        rays.append(self._cast_ray(-0.785, -1.2))   # down-left
-        rays.append(self._cast_ray( 0.785, -1.2))   # down-right
-
-        # Total: 5 + 5 + 3 + 3 + 3 = 19
+        # --- Ground checks (3) ---
+        rays.append(self._cast_ray(0, -1.57))
+        rays.append(self._cast_ray(-0.785, -1.2))
+        rays.append(self._cast_ray( 0.785, -1.2))
 
         pos = self.bot.entity.position
         vel = self.bot.entity.velocity
 
-        elapsed   = max(0, time.time() - self.start_time) if self.start_time > 0 else 0
-        norm_time = max(0, 1.0 - (elapsed / timeout_seconds))
+        # Tick-based time remaining
+        norm_time = max(0.0, 1.0 - (self.tick_count / timeout_ticks))
 
-        # Track airtime every tick this is called
-        if self.bot.entity.onGround:
+        # Update debounced ground state
+        self._update_on_ground()
+
+        # Track airtime using debounced value
+        if self.on_ground:
             self.ground_ticks += 1
         else:
             self.air_ticks += 1
+
+        # Track facing & movement every tick
+        self._update_facing_goal()
+        self._update_visited_blocks()
 
         return {
             'rays': rays,
@@ -190,7 +272,7 @@ class BotTracker:
                 self.bot.entity.pitch / (math.pi / 2),
             ],
             'goal_direction': self.get_direction_to_goal(),
-            'on_ground': 1 if self.bot.entity.onGround else 0,
+            'on_ground': 1 if self.on_ground else 0,
             'distance_to_goal': min(1.0, self.get_distance_to_goal() / 30.0),
             'time_remaining': norm_time,
         }
@@ -208,7 +290,6 @@ class BotTracker:
         current_dist = math.sqrt(dx * dx + dy * dy + dz * dz)
         self.closest_euclidean = min(self.closest_euclidean, current_dist)
 
-        # Track best Euclidean progress (distance reduced from start)
         if self.max_distance_to_goal is not None:
             prog = self.max_distance_to_goal - current_dist
             self.best_forward_progress = max(self.best_forward_progress, prog)
@@ -221,39 +302,50 @@ class BotTracker:
 
     # ------------------------------------------------------------------
     def update_fitness(self, timeout_seconds):
-        total_ticks = self.air_ticks + self.ground_ticks
+        total_ticks   = self.air_ticks + self.ground_ticks
         airtime_ratio = self.air_ticks / max(1, total_ticks)
+        num_blocks    = len(self.visited_blocks)
 
-        # 1. Euclidean distance reduction — the primary gradient signal.
-        #    best_forward_progress is now computed as (start_dist - closest_dist)
-        #    in check_goal_reached, so it works for ANY course shape.
-        score = self.best_forward_progress * 20.0
+        avg_facing = (self.facing_goal_sum / self.facing_goal_ticks) \
+            if self.facing_goal_ticks > 0 else 0.0
 
-        # 2. Airtime reward — scales with progress so bunny-hopping in place
-        #    earns nothing, but sprint-jumping toward the goal earns a lot.
+        exploration_score = min(num_blocks, 8) * 5.0
+        facing_score = max(0.0, (avg_facing + 1.0) / 2.0) * 30.0
+        progress_score = self.best_forward_progress * 20.0
+
+        closeness_score = 0.0
+        if self.closest_euclidean < 5.0:
+            closeness = max(0.0, 5.0 - self.closest_euclidean)
+            closeness_score = closeness * closeness * 10.0
+
+        airtime_score = 0.0
         if total_ticks > 10:
             progress_scale = min(1.0, self.best_forward_progress / 2.0)
-            score += airtime_ratio * 20.0 * progress_scale
+            airtime_score = airtime_ratio * 20.0 * progress_scale
 
-        # 3. Survival bonus — small reward for staying alive while progressing.
-        #    Prevents the GA from treating a 2.7s fall the same as a 0.5s fall.
+        survival_score = 0.0
         if self.run_duration > 1.0 and self.best_forward_progress > 0.5:
-            score += min(self.run_duration, 6.0) * 2.0
+            survival_score = min(self.run_duration, 6.0) * 2.0
 
-        # 4. Goal completion
+        score = (exploration_score + facing_score + progress_score +
+                 closeness_score + airtime_score + survival_score)
+
         if self.reached_goal:
             score += 500.0
             time_bonus = max(0, (timeout_seconds - self.run_duration) * 50.0)
             score += time_bonus
             score += airtime_ratio * 100.0
-        else:
-            if self.run_duration < 0.5:
-                score *= 0.1  # instant fall
+
+        if not self.reached_goal:
+            if num_blocks <= 1:
+                score *= 0.05
+            elif self.best_forward_progress < 0.3:
+                score *= 0.3
+            elif self.run_duration < 0.5:
+                score *= 0.1
             elif self.run_duration >= timeout_seconds - 0.5:
                 if self.best_forward_progress < 1.5:
-                    score *= 0.2  # coward penalty
-                else:
-                    score *= 0.8
+                    score *= 0.15
 
         self.fitness_score = max(0.0, score)
         return self.fitness_score
