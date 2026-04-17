@@ -1,7 +1,7 @@
 ################################################
-# GMU ECE 556 - 3/14/2026
-# Minecraft Neuromorphic Parkour Trainer
-# 
+# GMU ECE 556 - 4/20/2026
+# Minecraft Neuromorphic Parkour Trainer v2
+#  
 # ERIC ZIPOR 
 # G01359507
 ################################################
@@ -21,20 +21,12 @@ mineflayer = require('mineflayer')
 
 # Settings
 POPULATION_SIZE = 10       # number of networks in the gene pool
-
-SEQUENTIAL_MODE = True
-TRIALS_PER_NET  = 3        
-# True = 1 bot runs each network one-by-one
-# False = N bots run all networks in parallel 
-
-# if Sequential mode: run each network N times, average the fitness
-
 TEAM_NAME    = "bots"
 ADMIN_PLAYER = "EricZoop"
 
 # Coordinates
 SPAWN_POS     = {'x': 0.5,   'y': -63, 'z': 0.5}
-GOAL_POS      = {'x': 0.5,   'y': -63, 'z': 8.5}
+GOAL_POS      = {'x': 0.5,   'y': -63, 'z': 6.5}
 PURGATORY_POS = {'x': -14.5, 'y': -63, 'z': 0.5}
 
 # Training Parameters
@@ -42,6 +34,13 @@ TIMEOUT_SECONDS  = 15
 TIMEOUT_TICKS    = TIMEOUT_SECONDS * 20 # server tick
 RAY_MAX_DIST     = 7
 VOID_Y           = -65
+
+SEQUENTIAL_MODE = False
+TRIALS_PER_NET  = 3        
+# True = 1 bot runs each network one-by-one
+# False = N bots run all networks in parallel 
+
+# if Sequential mode: run each network N times, average the fitness
 
 # Neural Network Architecture
 INPUT_SIZE        = 33
@@ -155,7 +154,7 @@ class BotGeneration:
     # ------------------------------------------------------------------
     def create_bot(self, index):
         bot = mineflayer.createBot({
-            'host':     '192.168.1.118',
+            'host':     'localhost', # 192.168.1.118
             'port':     25565,
             'username': f'Bot_{index}',
             'version':  '1.19.4',
