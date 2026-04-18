@@ -52,6 +52,11 @@ class BotTracker:
         self._on_ground_counter    = 0
 
     # ------------------------------------------------------------------
+    def set_target_pos(self, new_pos):
+        """Update goal during a run or between runs (used by pause/newgoal)."""
+        self.target_pos = Vec3(new_pos['x'], new_pos['y'], new_pos['z'])
+
+    # ------------------------------------------------------------------
     def reset_for_run(self):
         self.is_active            = False
         self.is_settling          = False
@@ -77,10 +82,6 @@ class BotTracker:
 
     # ------------------------------------------------------------------
     def _update_on_ground(self):
-        """
-        Debounce onGround so single-tick flickers don't change sensor input.
-        Only switches state after ON_GROUND_DEBOUNCE consecutive agreeing ticks.
-        """
         if not self.bot.entity:
             return
 
@@ -107,8 +108,24 @@ class BotTracker:
         except Exception:
             return 999.0
 
+    def _quantized_yaw(self):
+        return round(self.bot.entity.yaw, RAY_QUANTIZE_DECIMALS)
+
+    # ------------------------------------------------------------------
+    # Rotation-invariant transforms — all use the SAME quantized yaw
+    # so that position, velocity, and goal_direction stay internally consistent.
+    # ------------------------------------------------------------------
+    def _world_to_local_xz(self, wx, wz, cos_y, sin_y):
+        """Rotate an (x, z) world-frame vector into the bot's local frame.
+        Returns (forward, right). Matches the forward/right basis used by
+        Minecraft's yaw convention (yaw=0 faces -Z, yaw increases clockwise
+        viewed from above, so yaw=+pi/2 faces +X)."""
+        local_forward = -sin_y * wx - cos_y * wz
+        local_right   =  cos_y * wx - sin_y * wz
+        return local_forward, local_right
+
     def get_direction_to_goal(self):
-        """Goal direction in the bot's LOCAL frame (accounts for yaw)."""
+        """Unit vector from bot to goal, in the bot's LOCAL frame."""
         if not self.bot.entity:
             return [0.0, 0.0, 0.0]
         pos = self.bot.entity.position
@@ -119,15 +136,9 @@ class BotTracker:
         if dist < 0.001:
             return [0.0, 0.0, 0.0]
 
-        yaw = round(self.bot.entity.yaw, RAY_QUANTIZE_DECIMALS)
-        cos_y = math.cos(yaw)
-        sin_y = math.sin(yaw)
-
-        local_forward = (-sin_y * dx + -cos_y * dz) / dist
-        local_right   = ( cos_y * dx + -sin_y * dz) / dist
-        local_up      = dy / dist
-
-        return [local_forward, local_right, local_up]
+        yaw = self._quantized_yaw()
+        fwd, right = self._world_to_local_xz(dx, dz, math.cos(yaw), math.sin(yaw))
+        return [fwd / dist, right / dist, dy / dist]
 
     def _update_facing_goal(self):
         if not self.bot.entity:
@@ -162,16 +173,12 @@ class BotTracker:
         if not self.bot.entity:
             return 0.0
         try:
-            # Quantize base orientation so tiny yaw/pitch drift
-            # doesn't change which block the ray hits
-            base_yaw   = round(self.bot.entity.yaw,   RAY_QUANTIZE_DECIMALS)
-            base_pitch = round(self.bot.entity.pitch,  RAY_QUANTIZE_DECIMALS)
+            base_yaw   = self._quantized_yaw()
+            base_pitch = round(self.bot.entity.pitch, RAY_QUANTIZE_DECIMALS)
             yaw   = base_yaw + yaw_offset
             pitch = base_pitch + pitch_offset
 
             pos = self.bot.entity.position
-            # Quantize ray origin so sub-epsilon position drift
-            # doesn't shift rays across block boundaries
             eye_x = round(pos.x, RAY_QUANTIZE_DECIMALS)
             eye_y = round(pos.y + 1.62, RAY_QUANTIZE_DECIMALS)
             eye_z = round(pos.z, RAY_QUANTIZE_DECIMALS)
@@ -199,14 +206,28 @@ class BotTracker:
     # ------------------------------------------------------------------
     def get_sensor_input_vector(self, timeout_ticks):
         """
-        19 rays + 3 pos + 3 vel + 2 orient + 3 goal_dir + 3 scalars = 33
+        Returns a dict of sensor channels. All spatial channels are expressed
+        in the bot's LOCAL (ego-centric) frame so the policy generalizes
+        across courses with different orientations.
+
+        Channel sizes:
+          rays           : 19  (unchanged)
+          position       :  3  (local-frame offset to goal, [fwd, up, right])
+          velocity       :  3  (local-frame velocity, [fwd, up, right])
+          self_state     :  2  (pitch, horizontal_speed) - BOTH rotation-invariant
+          goal_direction :  3  (local-frame unit vector, [fwd, right, up])
+          on_ground          :  1
+          distance_to_goal   :  1
+          time_remaining     :  1
+                          ----
+                          total 33
         """
         if not self.bot.entity or not self.is_active:
             return {
                 'rays': [0] * 19,
                 'position': [0] * 3,
                 'velocity': [0] * 3,
-                'orientation': [0] * 2,
+                'self_state': [0] * 2,
                 'goal_direction': [0] * 3,
                 'on_ground': 0,
                 'distance_to_goal': 0,
@@ -214,24 +235,19 @@ class BotTracker:
             }
 
         rays = []
-
-        # --- Forward hemisphere, horizontal (5) ---
+        # Forward hemisphere, horizontal (5)
         for angle in [-1.047, -0.524, 0, 0.524, 1.047]:
             rays.append(self._cast_ray(angle, 0))
-
-        # --- Forward hemisphere, down-angled (5) ---
+        # Forward hemisphere, down-angled (5)
         for angle in [-1.047, -0.524, 0, 0.524, 1.047]:
             rays.append(self._cast_ray(angle, -0.35))
-
-        # --- Forward hemisphere, upward (3) ---
+        # Forward hemisphere, upward (3)
         for angle in [-0.785, 0, 0.785]:
             rays.append(self._cast_ray(angle, 0.6))
-
-        # --- Steep jump trajectory (3) ---
+        # Steep jump trajectory (3)
         for angle in [-0.524, 0, 0.524]:
             rays.append(self._cast_ray(angle, -0.9))
-
-        # --- Ground checks (3) ---
+        # Ground checks (3)
         rays.append(self._cast_ray(0, -1.57))
         rays.append(self._cast_ray(-0.785, -1.2))
         rays.append(self._cast_ray( 0.785, -1.2))
@@ -239,39 +255,60 @@ class BotTracker:
         pos = self.bot.entity.position
         vel = self.bot.entity.velocity
 
-        # Tick-based time remaining
+        # One quantized yaw, shared by position / velocity / goal_direction
+        yaw = self._quantized_yaw()
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
+
+        # -- Rotation-invariant position: goal offset in bot's frame --
+        gdx = self.target_pos.x - pos.x
+        gdy = self.target_pos.y - pos.y
+        gdz = self.target_pos.z - pos.z
+        pos_fwd, pos_right = self._world_to_local_xz(gdx, gdz, cos_y, sin_y)
+        position = [pos_fwd / 25.0, gdy / 10.0, pos_right / 25.0]
+
+        # -- Rotation-invariant velocity: velocity in bot's frame --
+        vel_fwd, vel_right = self._world_to_local_xz(vel.x, vel.z, cos_y, sin_y)
+        velocity = [
+            max(-1.0, min(1.0, vel_fwd)),
+            max(-1.0, min(1.0, vel.y)),
+            max(-1.0, min(1.0, vel_right)),
+        ]
+
+        # -- Rotation-invariant self-state: pitch + horizontal speed --
+        # Yaw is deliberately EXCLUDED. It is world-absolute and caused the
+        # policy to memorize a single course orientation.
+        speed_xz = math.sqrt(vel.x * vel.x + vel.z * vel.z)
+        self_state = [
+            self.bot.entity.pitch / (math.pi / 2.0),
+            min(1.0, speed_xz / 0.5),
+        ]
+
+        # -- Goal direction in local frame (already rotation-invariant) --
+        gd_dist = math.sqrt(gdx * gdx + gdy * gdy + gdz * gdz)
+        if gd_dist < 0.001:
+            goal_direction = [0.0, 0.0, 0.0]
+        else:
+            gd_fwd, gd_right = self._world_to_local_xz(gdx, gdz, cos_y, sin_y)
+            goal_direction = [gd_fwd / gd_dist, gd_right / gd_dist, gdy / gd_dist]
+
         norm_time = max(0.0, 1.0 - (self.tick_count / timeout_ticks))
 
-        # Update debounced ground state
         self._update_on_ground()
-
-        # Track airtime using debounced value
         if self.on_ground:
             self.ground_ticks += 1
         else:
             self.air_ticks += 1
 
-        # Track facing & movement every tick
         self._update_facing_goal()
         self._update_visited_blocks()
 
         return {
             'rays': rays,
-            'position': [
-                (pos.x - self.target_pos.x) / 25,
-                (pos.y - self.target_pos.y) / 10,
-                (pos.z - self.target_pos.z) / 25,
-            ],
-            'velocity': [
-                max(-1, min(1, vel.x)),
-                max(-1, min(1, vel.y)),
-                max(-1, min(1, vel.z)),
-            ],
-            'orientation': [
-                self.bot.entity.yaw / math.pi,
-                self.bot.entity.pitch / (math.pi / 2),
-            ],
-            'goal_direction': self.get_direction_to_goal(),
+            'position': position,
+            'velocity': velocity,
+            'self_state': self_state,
+            'goal_direction': goal_direction,
             'on_ground': 1 if self.on_ground else 0,
             'distance_to_goal': min(1.0, self.get_distance_to_goal() / 30.0),
             'time_remaining': norm_time,

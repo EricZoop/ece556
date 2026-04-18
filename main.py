@@ -1,8 +1,8 @@
 ################################################
-# GMU ECE 556 - 4/20/2026
 # Minecraft Neuromorphic Parkour Trainer v2
-#  
-# ERIC ZIPOR 
+# GMU ECE 556 - 4/20/2026
+#
+# Eric Zipor
 # G01359507
 ################################################
 
@@ -19,8 +19,9 @@ from genetic_algorithm import GeneticAlgorithm
 
 mineflayer = require('mineflayer')
 
-# Settings
-POPULATION_SIZE = 10       # number of networks in the gene pool
+# ======================================================================
+# SHARED CONFIG (must match trial_run.py names exactly)
+# ======================================================================
 TEAM_NAME    = "bots"
 ADMIN_PLAYER = "EricZoop"
 
@@ -29,58 +30,59 @@ SPAWN_POS     = {'x': 0.5,   'y': -63, 'z': 0.5}
 GOAL_POS      = {'x': 0.5,   'y': -63, 'z': 6.5}
 PURGATORY_POS = {'x': -14.5, 'y': -63, 'z': 0.5}
 
-# Training Parameters
-TIMEOUT_SECONDS  = 15
-TIMEOUT_TICKS    = TIMEOUT_SECONDS * 20 # server tick
-RAY_MAX_DIST     = 7
-VOID_Y           = -65
+# Training / trial parameters
+TIMEOUT_SECONDS = 15
+TIMEOUT_TICKS   = TIMEOUT_SECONDS * 20
+RAY_MAX_DIST    = 7
+VOID_Y          = -65
 
-SEQUENTIAL_MODE = False
-TRIALS_PER_NET  = 3        
-# True = 1 bot runs each network one-by-one
-# False = N bots run all networks in parallel 
-
-# if Sequential mode: run each network N times, average the fitness
-
-# Neural Network Architecture
+# Neural network architecture (must match the shape used by trial_run's loaded nets)
 INPUT_SIZE        = 33
 HIDDEN_LAYER_SIZE = 32
 OUTPUT_SIZE       = 4
 
-# Sensor quantization
+# Sensor quantization (must be applied identically in trial_run)
 SENSOR_QUANTIZE_DECIMALS = 3
 
-# Yaw control
-YAW_RATE          = 0.3
+# Control
+YAW_RATE = 0.3   # rad per action step
 
-# Genetic Algorithm Parameters
+# ======================================================================
+# TRAINING-ONLY CONFIG
+# ======================================================================
+POPULATION_SIZE = 10
+SEQUENTIAL_MODE = True
+TRIALS_PER_NET  = 3
+
 MUTATION_RATE     = 0.1
 MUTATION_STRENGTH = 0.2
 ELITE_COUNT       = 2
 
-# Derived
 BOT_COUNT = 1 if SEQUENTIAL_MODE else POPULATION_SIZE
 
-# Bot states (for sequential mode)
+# Bot states
 STATE_IDLE        = 'IDLE'
-STATE_TP_TO_SPAWN = 'TP_TO_SPAWN'    # just sent /tp, waiting for it to land
-STATE_VERIFY_POS  = 'VERIFY_POS'     # checking we're actually at spawn
-STATE_SETTLING    = 'SETTLING'       # holding still
-STATE_ACTIVE      = 'ACTIVE'         # neural net is driving
-STATE_POST_RUN    = 'POST_RUN'       # brief pause after run ends and /kill
+STATE_TP_TO_SPAWN = 'TP_TO_SPAWN'
+STATE_VERIFY_POS  = 'VERIFY_POS'
+STATE_SETTLING    = 'SETTLING'
+STATE_ACTIVE      = 'ACTIVE'
+STATE_POST_RUN    = 'POST_RUN'
 
 # Stability thresholds
-SPAWN_TOLERANCE     = 1.0  # must be within this distance of spawn to verify tp
-STABLE_POS_EPSILON  = 0.02 # position must not drift more than this per tick
-STABLE_VEL_EPSILON  = 0.05 # velocity magnitude must be below this
-TELEPORT_WAIT_TICKS = 10   # 0.5s  - wait after teleport command
-SETTLE_MIN_TICKS    = 20   # minimum ticks in settle before checking stability
-SETTLE_STABLE_NEED  = 10   # must be stable for this many CONSECUTIVE ticks
-SETTLE_MAX_TICKS    = 120  # give up and re-teleport if not stable by this tick
-POST_RUN_TICKS      = 20   # 1.0s  - pause between runs after /kill
-STARTUP_TICKS       = 100  # 5.0s  - initial delay before first gen
+SPAWN_TOLERANCE     = 1.0
+STABLE_POS_EPSILON  = 0.02
+STABLE_VEL_EPSILON  = 0.05
+TELEPORT_WAIT_TICKS = 10
+SETTLE_MIN_TICKS    = 20
+SETTLE_STABLE_NEED  = 10
+SETTLE_MAX_TICKS    = 120
+POST_RUN_TICKS      = 20
+STARTUP_TICKS       = 100
 
 
+# ======================================================================
+# HELPERS
+# ======================================================================
 def safe_stop_bot(bot):
     if not bot:
         return
@@ -106,7 +108,6 @@ def _tp_cmd(x, y, z):
 
 
 def _dist_to(bot, target_dict):
-    # Euclidean distance from bot to a coordinate dict.
     if not bot or not bot.entity:
         return 999.0
     p = bot.entity.position
@@ -116,6 +117,9 @@ def _dist_to(bot, target_dict):
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 
 
+# ======================================================================
+# MAIN GENERATION MANAGER
+# ======================================================================
 class BotGeneration:
     def __init__(self):
         self.trackers = []
@@ -134,27 +138,32 @@ class BotGeneration:
         self.all_time_best_network    = None
         self.all_time_best_generation = 0
 
+        # --- Pause / new-goal coordination ---
+        # pending_pause: user asked for pause; honor after current gen evolves
+        # paused_for_goal: currently paused, CLI thread may prompt for new coords
+        self.pending_pause  = False
+        self.paused_for_goal = False
+
         # Sequential-mode state
-        self.current_pop_index        = 0
-        self.current_trial            = 0
-        self.trial_fitness            = []
-        self.sequential_fitness       = [0.0] * POPULATION_SIZE
+        self.current_pop_index  = 0
+        self.current_trial      = 0
+        self.trial_fitness      = []
+        self.sequential_fitness = [0.0] * POPULATION_SIZE
 
-        # Tick-driven state machine (per bot)
-        self.bot_state                = {}     # bot_index -> state string
-        self.state_tick               = {}     # bot_index -> ticks in current state
-        self.tp_retries               = {}     # bot_index -> retry count
-        self.stable_ticks             = {}     # bot_index -> consecutive stable ticks
-        self.last_pos                 = {}     # bot_index -> (x, y, z) last tick
+        # Tick-driven state machine
+        self.bot_state    = {}
+        self.state_tick   = {}
+        self.tp_retries   = {}
+        self.stable_ticks = {}
+        self.last_pos     = {}
 
-        # Global tick counter for startup delay
-        self.global_tick              = 0
-        self.started                  = False
+        self.global_tick = 0
+        self.started     = False
 
     # ------------------------------------------------------------------
     def create_bot(self, index):
         bot = mineflayer.createBot({
-            'host':     'localhost', # 192.168.1.118
+            'host':     '192.168.1.118',
             'port':     25565,
             'username': f'Bot_{index}',
             'version':  '1.19.4',
@@ -163,11 +172,11 @@ class BotGeneration:
         tracker = BotTracker(bot, GOAL_POS, ray_max_dist=RAY_MAX_DIST, spawn_pos=SPAWN_POS)
         tracker.bot_index = index
 
-        self.bot_state[index]  = STATE_IDLE
-        self.state_tick[index] = 0
-        self.tp_retries[index] = 0
+        self.bot_state[index]   = STATE_IDLE
+        self.state_tick[index]  = 0
+        self.tp_retries[index]  = 0
         self.stable_ticks[index] = 0
-        self.last_pos[index]   = None
+        self.last_pos[index]    = None
 
         @Once(bot, 'spawn')
         def on_spawn(*args):
@@ -186,13 +195,9 @@ class BotGeneration:
                         f'/setworldspawn {PURGATORY_POS["x"]} '
                         f'{PURGATORY_POS["y"]} {PURGATORY_POS["z"]}'
                     )
-                bot.chat(
-                    _tp_cmd(
-                        PURGATORY_POS['x'],
-                        PURGATORY_POS['y'],
-                        PURGATORY_POS['z'],
-                    )
-                )
+                bot.chat(_tp_cmd(
+                    PURGATORY_POS['x'], PURGATORY_POS['y'], PURGATORY_POS['z']
+                ))
             except Exception as e:
                 print(f'[Bot {index}] Spawn error: {e}')
 
@@ -203,7 +208,7 @@ class BotGeneration:
         self.trackers.append(tracker)
 
     # ------------------------------------------------------------------
-    # -- TICK-DRIVEN STATE MACHINE --
+    # STATE MACHINE
     # ------------------------------------------------------------------
     def _set_state(self, index, new_state):
         self.bot_state[index]  = new_state
@@ -217,7 +222,7 @@ class BotGeneration:
         self.state_tick[index] += 1
         tick = self.state_tick[index]
 
-        # -- Startup delay: wait before first generation --
+        # Startup delay
         if not self.started:
             self.global_tick += 1
             safe_stop_bot(bot)
@@ -226,89 +231,70 @@ class BotGeneration:
                 self.start_new_run()
             return
 
-        # -- IDLE: do nothing --
         if state == STATE_IDLE:
             safe_stop_bot(bot)
             return
 
-        # -- TP_TO_SPAWN: waiting for teleport to take effect --
         if state == STATE_TP_TO_SPAWN:
             safe_stop_bot(bot)
             if tick >= TELEPORT_WAIT_TICKS:
                 self._set_state(index, STATE_VERIFY_POS)
             return
 
-        # -- VERIFY_POS: confirm bot actually arrived at spawn --
         if state == STATE_VERIFY_POS:
             safe_stop_bot(bot)
             dist = _dist_to(bot, SPAWN_POS)
             on_ground = bot.entity and bot.entity.onGround
 
             if dist < SPAWN_TOLERANCE and on_ground:
-                # Good — proceed to settle
                 self.tp_retries[index] = 0
                 self._set_state(index, STATE_SETTLING)
                 tracker.is_settling  = True
                 tracker.settle_ticks = 0
                 return
 
-            # Not there yet — retry teleport (up to 5 times)
             if tick > 20:
                 self.tp_retries[index] += 1
                 if self.tp_retries[index] > 5:
                     print(f'  [Warn] Bot {index} failed to reach spawn after 5 retries.')
                     self.tp_retries[index] = 0
-                    # Force proceed anyway
                     self._set_state(index, STATE_SETTLING)
                     tracker.is_settling  = True
                     tracker.settle_ticks = 0
                     return
-
                 try:
-                    bot.chat(
-                        _tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z'])
-                    )
+                    bot.chat(_tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z']))
                 except Exception:
                     pass
                 self._set_state(index, STATE_TP_TO_SPAWN)
             return
 
-        # -- SETTLING: verify bot is fully stationary before starting --
         if state == STATE_SETTLING:
             safe_stop_bot(bot)
 
-            # On first tick of settle, re-teleport to snap position exactly
             if tick == 1:
                 try:
-                    bot.chat(
-                        _tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z'])
-                    )
+                    bot.chat(_tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z']))
                 except Exception:
                     pass
                 self.stable_ticks[index] = 0
                 self.last_pos[index] = None
                 return
 
-            # Don't check stability until minimum ticks have passed
             if tick < SETTLE_MIN_TICKS:
                 return
 
-            # Check all stability conditions
             is_stable = True
-
             if not bot.entity:
                 is_stable = False
 
             if bot.entity:
                 pos = bot.entity.position
                 vel = bot.entity.velocity
-
-                # Velocity check
                 vel_mag = math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z)
                 if vel_mag > STABLE_VEL_EPSILON:
                     is_stable = False
 
-                # Position drift check (compared to last tick)
                 current_pos = (pos.x, pos.y, pos.z)
                 if self.last_pos[index] is not None:
                     lp = self.last_pos[index]
@@ -320,7 +306,7 @@ class BotGeneration:
                     if drift > STABLE_POS_EPSILON:
                         is_stable = False
                 else:
-                    is_stable = False  # need at least one prior frame
+                    is_stable = False
                 self.last_pos[index] = current_pos
             else:
                 is_stable = False
@@ -330,13 +316,9 @@ class BotGeneration:
             else:
                 self.stable_ticks[index] = 0
 
-            # Activate once stable for enough consecutive ticks
             if self.stable_ticks[index] >= SETTLE_STABLE_NEED:
-                # Force-snap position to exact values one last time
                 try:
-                    bot.chat(
-                        _tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z'])
-                    )
+                    bot.chat(_tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z']))
                 except Exception:
                     pass
 
@@ -347,16 +329,12 @@ class BotGeneration:
                 tracker.is_active    = True
                 tracker.tick_count   = 0
                 tracker.wall_start   = time.time()
-                # Skip one tick to let the snap take effect
                 self._set_state(index, STATE_ACTIVE)
                 return
 
-            # Safety: if we've been settling too long, re-teleport and retry
             if tick >= SETTLE_MAX_TICKS:
                 try:
-                    bot.chat(
-                        _tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z'])
-                    )
+                    bot.chat(_tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z']))
                 except Exception:
                     pass
                 self._set_state(index, STATE_SETTLING)
@@ -364,31 +342,25 @@ class BotGeneration:
                 self.last_pos[index] = None
             return
 
-        # -- ACTIVE: neural net drives the bot --
         if state == STATE_ACTIVE:
             tracker.tick_count += 1
 
-            # 1. Void check
             if bot.entity and bot.entity.position.y < VOID_Y:
                 self._end_run(index, 'DIED')
                 return
 
-            # 2. Tick-based timeout
             if tracker.tick_count >= TIMEOUT_TICKS:
                 self._end_run(index, 'TIMEOUT')
                 return
 
-            # 3. Goal check
             if tracker.check_goal_reached():
                 self._end_run(index, 'SUCCESS')
                 return
 
-            # 4. Neural network action
             action = self.get_neural_action(index)
             self.execute_action(bot, action)
             return
 
-        # -- POST_RUN: brief pause after /kill to wait for respawn --
         if state == STATE_POST_RUN:
             safe_stop_bot(bot)
             if tick >= POST_RUN_TICKS:
@@ -411,7 +383,6 @@ class BotGeneration:
 
         fitness = tracker.update_fitness(TIMEOUT_SECONDS)
 
-        # --- NEW FALLBACK LOGIC: Immediate save mid-generation ---
         pop_index = self.current_pop_index if SEQUENTIAL_MODE else index
         if fitness > self.all_time_best_score:
             self.all_time_best_score = fitness
@@ -419,15 +390,11 @@ class BotGeneration:
             self.all_time_best_network = self.ga.population[pop_index].clone()
             print(f'  [Fallback] NEW HIGH SCORE!: {fitness:.2f} | saved.')
             self._save_best(net_index=pop_index)
-        # ---------------------------------------------------------
 
         wall_elapsed = time.time() - tracker.wall_start if tracker.wall_start else 0
         elapsed_str  = f'{wall_elapsed:.1f}s'
 
-        label = {
-            'SUCCESS': 'PASS', 'TIMEOUT': 'TIMEOUT', 'DIED': 'FELL'
-        }.get(reason, reason)
-
+        label = {'SUCCESS': 'PASS', 'TIMEOUT': 'TIMEOUT', 'DIED': 'FELL'}.get(reason, reason)
         prog   = tracker.best_forward_progress
         close  = tracker.closest_euclidean
         blocks = len(tracker.visited_blocks)
@@ -436,8 +403,7 @@ class BotGeneration:
 
         display_idx = self.current_pop_index if SEQUENTIAL_MODE else index
         trial_str = f' t{self.current_trial + 1}' if SEQUENTIAL_MODE else ''
-        
-        # Output Generation, Network, and Trial number
+
         print(
             f'  Gen {self.ga.generation:2d} | Net {display_idx:2d}{trial_str} | {label:7s} | {elapsed_str:>6} | '
             f'prog:{prog:4.1f} euc:{close:4.1f} blk:{blocks:2d} face:{facing:+.2f} | '
@@ -447,7 +413,6 @@ class BotGeneration:
         if SEQUENTIAL_MODE:
             self.trial_fitness.append(fitness)
 
-        # -- THE NUCLEAR OPTION: Fully destroy and recreate server-side entity --
         try:
             bot.chat('/kill @s')
         except Exception:
@@ -457,21 +422,17 @@ class BotGeneration:
 
     # ------------------------------------------------------------------
     def _on_post_run_complete(self, index):
-        """Called when post-run pause finishes. Decides what happens next."""
         if SEQUENTIAL_MODE:
             self.current_trial += 1
             if self.current_trial < TRIALS_PER_NET:
-                # Run the next trial for this network
                 self._begin_sequential_run()
             else:
-                # All trials for this network finished — average and advance
                 avg_fitness = sum(self.trial_fitness) / len(self.trial_fitness)
                 self.sequential_fitness[self.current_pop_index] = avg_fitness
-                
-                # Print the average and individual scores
+
                 scores_str = ', '.join(f'{s:.1f}' for s in self.trial_fitness)
                 print(f'         avg: {avg_fitness:.2f}  ({scores_str})')
-                
+
                 self.current_pop_index += 1
                 self.current_trial = 0
                 self.trial_fitness = []
@@ -485,22 +446,18 @@ class BotGeneration:
             self.check_generation_complete()
 
     # ------------------------------------------------------------------
-    # -- SEQUENTIAL-MODE METHODS --
+    # SEQUENTIAL MODE
     # ------------------------------------------------------------------
     def _begin_sequential_run(self):
-        """Teleport the single bot to spawn for the next run."""
         tracker = self.trackers[0]
         bot     = tracker.bot
 
         tracker.reset_for_run()
         safe_stop_bot(bot)
 
-        # Send teleport command — the state machine handles the rest
         try:
             if bot and bot.entity:
-                bot.chat(
-                    _tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z'])
-                )
+                bot.chat(_tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z']))
             elif bot:
                 try:
                     bot.respawn()
@@ -512,7 +469,6 @@ class BotGeneration:
         self._set_state(0, STATE_TP_TO_SPAWN)
 
     def _finish_sequential_generation(self):
-        """All population members tested — evaluate and evolve."""
         self.generation_complete = True
         self._set_state(0, STATE_IDLE)
         print()
@@ -529,10 +485,7 @@ class BotGeneration:
             f'passed: {successes}/{POPULATION_SIZE}'
         )
 
-        # Fallback check handled early saves, but we still trigger standard save here
-        # if the best in this gen beats all-time (in case it wasn't caught mid-run or is sequential)
         if best_score >= self.all_time_best_score:
-            # Only resave if it actually updated the best generation to avoid duplicate saves
             if self.all_time_best_generation != self.ga.generation:
                 self.all_time_best_score      = best_score
                 self.all_time_best_generation = self.ga.generation
@@ -545,11 +498,13 @@ class BotGeneration:
 
         if self.auto_evolve:
             self.ga.evolve()
-            # Next generation starts on next tick via _on_post_run kickoff
-            self.start_new_run()
+            if self.pending_pause:
+                self._enter_pause()
+            else:
+                self.start_new_run()
 
     # ------------------------------------------------------------------
-    # -- SHARED / PARALLEL-MODE METHODS --
+    # PARALLEL MODE
     # ------------------------------------------------------------------
     def start_new_run(self):
         print(f'\n--- Generation {self.ga.generation} ---')
@@ -563,7 +518,6 @@ class BotGeneration:
             self._begin_sequential_run()
             return
 
-        # -- Parallel mode --
         for tracker in self.trackers:
             tracker.reset_for_run()
             safe_stop_bot(tracker.bot)
@@ -572,9 +526,7 @@ class BotGeneration:
             bot = tracker.bot
             if bot and bot.entity:
                 try:
-                    bot.chat(
-                        _tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z'])
-                    )
+                    bot.chat(_tp_cmd(SPAWN_POS['x'], SPAWN_POS['y'], SPAWN_POS['z']))
                 except Exception:
                     print(f'  [Warn] Bot {i} failed to teleport.')
             else:
@@ -586,20 +538,20 @@ class BotGeneration:
 
     # ------------------------------------------------------------------
     def get_neural_action(self, bot_index):
-        tracker     = self.trackers[bot_index]
-        sensor_data = tracker.get_sensor_input_vector(TIMEOUT_TICKS)
+        tracker = self.trackers[bot_index]
+        sensor  = tracker.get_sensor_input_vector(TIMEOUT_TICKS)
 
         inputs = []
-        inputs.extend(sensor_data['rays'])             # 19
-        inputs.extend(sensor_data['position'])         # 3
-        inputs.extend(sensor_data['velocity'])         # 3
-        inputs.extend(sensor_data['orientation'])      # 2
-        inputs.extend(sensor_data['goal_direction'])   # 3
-        inputs.append(sensor_data['on_ground'])        # 1
-        inputs.append(sensor_data['distance_to_goal']) # 1
-        inputs.append(sensor_data['time_remaining'])   # 1
+        inputs.extend(sensor['rays'])            # 19
+        inputs.extend(sensor['position'])        # 3 (local frame)
+        inputs.extend(sensor['velocity'])        # 3 (local frame)
+        inputs.extend(sensor['self_state'])      # 2 (pitch + horizontal speed)
+        inputs.extend(sensor['goal_direction'])  # 3 (local frame)
+        inputs.append(sensor['on_ground'])       # 1
+        inputs.append(sensor['distance_to_goal'])# 1
+        inputs.append(sensor['time_remaining'])  # 1
+        # ---------------------------------------  33
 
-        # Quantize to eliminate float noise between runs
         inputs = [round(v, SENSOR_QUANTIZE_DECIMALS) for v in inputs]
 
         pop_index = self.current_pop_index if SEQUENTIAL_MODE else bot_index
@@ -609,9 +561,9 @@ class BotGeneration:
         if not bot.entity:
             return
 
-        bot.setControlState('left',  bool(action[0]))
-        bot.setControlState('right', bool(action[1]))
-        bot.setControlState('jump',  bool(action[2]))
+        bot.setControlState('left',    bool(action[0]))
+        bot.setControlState('right',   bool(action[1]))
+        bot.setControlState('jump',    bool(action[2]))
         bot.setControlState('forward', True)
         bot.setControlState('sprint',  True)
 
@@ -624,14 +576,11 @@ class BotGeneration:
 
     # ------------------------------------------------------------------
     def check_generation_complete(self):
-        """Parallel-mode only."""
         if self.generation_complete:
             return True
 
-        # Check if any bot is still running or in a non-idle transitional state
-        for i, t in enumerate(self.trackers):
-            s = self.bot_state[i]
-            if s not in (STATE_IDLE,):
+        for i in range(len(self.trackers)):
+            if self.bot_state[i] != STATE_IDLE:
                 return False
 
         self.generation_complete = True
@@ -650,8 +599,6 @@ class BotGeneration:
             f'passed: {successes}/{BOT_COUNT}'
         )
 
-        # Fallback check handled early saves, but we check here in case 
-        # a network tied or beat the previous generation's record
         if best_score >= self.all_time_best_score:
             if self.all_time_best_generation != self.ga.generation:
                 self.all_time_best_score      = best_score
@@ -665,19 +612,68 @@ class BotGeneration:
 
         if self.auto_evolve:
             self.ga.evolve()
-            self.start_new_run()
+            if self.pending_pause:
+                self._enter_pause()
+            else:
+                self.start_new_run()
 
         return True
+
+    # ------------------------------------------------------------------
+    # PAUSE / NEW-GOAL COORDINATION (called between threads)
+    # ------------------------------------------------------------------
+    def request_pause(self):
+        """Called by CLI thread. Pause will take effect after the current
+        generation completes and evolves."""
+        if self.paused_for_goal:
+            print('  Already paused. Use `resume` or supply new goal coords.')
+            return
+        if self.pending_pause:
+            print('  Pause already queued.')
+            return
+        self.pending_pause = True
+        print('  [Pause] Queued - will take effect after current generation evolves.')
+
+    def _enter_pause(self):
+        """Called by the physics thread just after ga.evolve() finishes."""
+        self.pending_pause = False
+        self.paused_for_goal = True
+        self.auto_evolve = False
+        print('\n' + '=' * 60)
+        print(f'  PAUSED after Gen {self.ga.generation - 1} '
+              f'(next gen is {self.ga.generation}).')
+        print(f'  All {len(self.trackers)} networks preserved in gene pool.')
+        print('  Type `newgoal <x> <y> <z>` or `resume` in the CLI.')
+        print('=' * 60 + '\n')
+
+    def apply_new_goal(self, x, y, z):
+        """Update goal coords on every tracker and resume training."""
+        global GOAL_POS
+        GOAL_POS = {'x': x, 'y': y, 'z': z}
+        for t in self.trackers:
+            t.set_target_pos(GOAL_POS)
+        print(f'  [NewGoal] Goal updated to ({x}, {y}, {z}) on all {len(self.trackers)} trackers.')
+
+    def resume(self):
+        """Resume training (with whatever GOAL_POS is currently set)."""
+        if not self.paused_for_goal:
+            self.auto_evolve = True
+            print('  Evolution re-enabled (was not paused for goal).')
+            return
+        self.paused_for_goal = False
+        self.auto_evolve = True
+        print(f'  [Resume] Continuing training on goal ({GOAL_POS["x"]}, '
+              f'{GOAL_POS["y"]}, {GOAL_POS["z"]}).')
+        self.start_new_run()
 
     # ------------------------------------------------------------------
     def _save_best(self, net_index='unknown'):
         if not self.all_time_best_network:
             return
-            
-        # Formatted strictly as requested: YYYY-MM-DD_HH-mm-ss_gen0_net1
+
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         fn = f'{timestamp}_gen{self.all_time_best_generation}_net{net_index}.json'
-        
+
         with open(fn, 'w') as f:
             json.dump(
                 {
@@ -696,20 +692,83 @@ class BotGeneration:
         self._save_best(net_index='manual')
 
 
-# ------------------------------------------------------------------------------
+# ======================================================================
+# CLI THREAD
+# ======================================================================
 def terminal_input_loop(gen):
-    print('\nCommands: pause | resume | save | quit\n')
+    print('\nCommands:')
+    print('  pause                -> pause after current gen, then prompt for new goal')
+    print('  newgoal <x> <y> <z>  -> set goal coords while paused (or queue a pause+prompt)')
+    print('  resume               -> resume training with current goal')
+    print('  save                 -> save current best network')
+    print('  quit                 -> save and exit\n')
+
     while True:
         try:
-            cmd = input().strip().lower()
-            if   cmd == 'pause':  gen.auto_evolve = False; print('  Evolution paused.')
-            elif cmd == 'resume': gen.auto_evolve = True;  print('  Evolution resumed.')
-            elif cmd == 'save':   gen.save_best()
-            elif cmd == 'quit':
-                gen.save_best()
-                sys.exit(0)
-        except Exception:
-            break
+            raw = input()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if not raw:
+            continue
+        parts = raw.strip().split()
+        cmd = parts[0].lower()
+
+        if cmd == 'pause':
+            # Request pause, then wait for the physics thread to enter
+            # paused_for_goal state, then prompt for coords in THIS thread.
+            gen.request_pause()
+            while not gen.paused_for_goal:
+                time.sleep(0.25)
+
+            print('\n  Enter new goal coordinates (or press Enter on any field to keep current):')
+            try:
+                cx = input(f'    x [{GOAL_POS["x"]}]: ').strip()
+                cy = input(f'    y [{GOAL_POS["y"]}]: ').strip()
+                cz = input(f'    z [{GOAL_POS["z"]}]: ').strip()
+                nx = float(cx) if cx else GOAL_POS['x']
+                ny = float(cy) if cy else GOAL_POS['y']
+                nz = float(cz) if cz else GOAL_POS['z']
+            except ValueError:
+                print('  [Error] Invalid number. Goal unchanged. Type `resume` to continue.')
+                continue
+            except (EOFError, KeyboardInterrupt):
+                print('\n  [Cancel] Goal unchanged. Type `resume` to continue.')
+                continue
+
+            gen.apply_new_goal(nx, ny, nz)
+            print('  Type `resume` when your new course is built and ready.')
+
+        elif cmd == 'newgoal':
+            # Inline form: `newgoal 6.5 -63 0.5`
+            if len(parts) != 4:
+                print('  Usage: newgoal <x> <y> <z>')
+                continue
+            try:
+                nx, ny, nz = float(parts[1]), float(parts[2]), float(parts[3])
+            except ValueError:
+                print('  [Error] Invalid numbers.')
+                continue
+
+            if not gen.paused_for_goal:
+                # Queue a pause and apply coords when pause lands
+                gen.request_pause()
+                while not gen.paused_for_goal:
+                    time.sleep(0.25)
+            gen.apply_new_goal(nx, ny, nz)
+            print('  Type `resume` when your new course is built and ready.')
+
+        elif cmd == 'resume':
+            gen.resume()
+
+        elif cmd == 'save':
+            gen.save_best()
+
+        elif cmd == 'quit':
+            gen.save_best()
+            sys.exit(0)
+
+        else:
+            print(f'  Unknown command: {cmd}')
 
 
 def main():
@@ -717,11 +776,9 @@ def main():
     trials_str = f' | Trials/net: {TRIALS_PER_NET}' if SEQUENTIAL_MODE else ''
     print('ECE 556 - Minecraft Neuromorphic Parkour Trainer')
     print(f'Mode: {mode_str} | Population: {POPULATION_SIZE}{trials_str}')
-    print(
-        f'Inputs: {INPUT_SIZE} | Hidden: {HIDDEN_LAYER_SIZE} '
-        f'| Outputs: {OUTPUT_SIZE} | Timeout: {TIMEOUT_SECONDS}s'
-    )
-    print(f'YAW_RATE={YAW_RATE} rad/tick')
+    print(f'Inputs: {INPUT_SIZE} | Hidden: {HIDDEN_LAYER_SIZE} '
+          f'| Outputs: {OUTPUT_SIZE} | Timeout: {TIMEOUT_SECONDS}s')
+    print(f'YAW_RATE={YAW_RATE} rad/tick | Goal: ({GOAL_POS["x"]}, {GOAL_POS["y"]}, {GOAL_POS["z"]})')
     print(f'Settle: min {SETTLE_MIN_TICKS}t + {SETTLE_STABLE_NEED}t stable | All delays tick-driven')
     print()
 
