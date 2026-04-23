@@ -138,16 +138,17 @@ class NeuralNetwork:
         return actions, activations
 
     # ------------------------------------------------------------------
+    # total params=(I * H) + H + (H * O) + O
     def get_weights(self):
         w = []
-        for i in range(self.input_size):
-            for j in range(self.hidden_size):
+        for i in range(self.input_size):           # 33
+            for j in range(self.hidden_size):      # x 32  = 1,056
                 w.append(self.weights_input_hidden[i][j])
-        w.extend(self.bias_hidden)
-        for i in range(self.hidden_size):
-            for j in range(self.output_size):
+        w.extend(self.bias_hidden)                 # + 32  = 1,088
+        for i in range(self.hidden_size):          # 32
+            for j in range(self.output_size):      # x 4   = 128  1,216
                 w.append(self.weights_hidden_output[i][j])
-        w.extend(self.bias_output)
+        w.extend(self.bias_output)                 # + 4   = 1,220
         return w
 
     def set_weights(self, weights):

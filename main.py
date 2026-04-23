@@ -1,5 +1,5 @@
 ################################################
-# Minecraft Neuromorphic Parkour Trainer v2
+# Minecraft Neuromorphic Parkour Trainer v1.1.2
 # GMU ECE 556 - 4/20/2026
 #
 # Eric Zipor

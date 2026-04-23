@@ -1,8 +1,6 @@
 # GMU ECE 556 - Minecraft Neuromorphic Parkour
 
-**note this runs in version 1.19.4**
-
-Set up a vanilla minecraft server
+Set up a 1.19.4 vanilla minecraft server
 
 https://www.minecraft.net/en-us/article/minecraft-java-edition-1-19-4#:~:text=Minecraft%20server%20jar
 
