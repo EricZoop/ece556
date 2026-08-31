@@ -91,19 +91,19 @@ block_1:
     - Redstone: Always Active
     - Command: execute if entity @a[scores={deaths=30..}] as @e[tag=block_pos] at @s as @e[type=marker,tag=rng_source,sort=random,limit=1] run scoreboard players operation @e[tag=block_pos,distance=..0.5,limit=1] rng = @s rng
 
-block_2
+block_2:
     - Type: Chain
     - Condition: Unconditional
     - Redstone: Always Active
     - Command: execute if entity @a[scores={deaths=30..}] as @e[tag=block_pos,scores={rng=0}] at @s run setblock ~ ~ ~ lime_wool
 
-block_3
+block_3:
     - Type: Chain
     - Condition: Unconditional
     - Redstone: Always Active
     - Command: execute if entity @a[scores={deaths=30..}] as @e[tag=block_pos,scores={rng=1}] at @s run setblock ~ ~ ~ air
 
-block_4
+block_4:
     - Type: Chain
     - Condition: Unconditional
     - Redstone: Always Active
